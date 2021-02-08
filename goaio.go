@@ -205,7 +205,7 @@ func (this *AIOConn) onTimeout(t *Timer) {
 			f := this.w.front()
 			if now.After(f.deadline) {
 				this.w.popFront()
-				this.service.postCompleteStatus(this, f.buff, 0, ErrSendTimeout, f.context)
+				this.service.postCompleteStatus(this, f.buff, f.offset, ErrSendTimeout, f.context)
 			} else {
 				break
 			}
@@ -405,7 +405,7 @@ func (this *AIOConn) doWrite() {
 		return
 	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
 		this.w.popFront()
-		this.service.postCompleteStatus(this, c.buff, size, fmt.Errorf("%d", err), c.context)
+		this.service.postCompleteStatus(this, c.buff, c.offset, fmt.Errorf("%d", err), c.context)
 	} else if err == syscall.EAGAIN {
 		if ver == this.writeableVer {
 			this.writeable = false
@@ -438,7 +438,7 @@ func (this *AIOConn) Do() {
 		}
 		for !this.w.empty() {
 			c := this.w.front()
-			this.service.postCompleteStatus(this, c.buff, 0, ErrConnClosed, c.context)
+			this.service.postCompleteStatus(this, c.buff, c.offset, ErrConnClosed, c.context)
 			this.w.popFront()
 		}
 		this.service.unwatch(this)
