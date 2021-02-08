@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"github.com/sniperHW/goaio"
 	"net"
-	"net/http"
-	_ "net/http/pprof"
 	"time"
 )
 
@@ -18,10 +16,6 @@ var bytescount int32
 var packetcount int32
 
 func main() {
-
-	go func() {
-		http.ListenAndServe("0.0.0.0:6060", nil)
-	}()
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:8110")
 	if err != nil {
@@ -33,13 +27,11 @@ func main() {
 		panic(err.Error())
 	}
 
-	service := goaio.NewAIOService(4)
-
 	go func() {
 		for {
-			err, conn, buff, bytestransfer, context := service.GetCompleteStatus()
+			err, conn, buff, bytestransfer, context := goaio.GetCompleteStatus()
 			if nil != err {
-				if err == ErrServiceClosed {
+				if err == goaio.ErrServiceClosed {
 					return
 				}
 				fmt.Println(err)
@@ -61,7 +53,7 @@ func main() {
 			return
 		}
 
-		c := service.Bind(conn)
+		_, c := goaio.Bind(conn)
 
 		c.SetRecvTimeout(time.Second * 5)
 

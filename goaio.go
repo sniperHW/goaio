@@ -29,6 +29,10 @@ const (
 	EV_ERROR = int(1 << 3)
 )
 
+var (
+	DefaultWorkerCount = 4
+)
+
 type AIOConn struct {
 	sync.Mutex
 	nnext         TaskI
@@ -517,7 +521,7 @@ func (this *AIOService) Bind(conn net.Conn) (error, *AIOConn) {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
-	if this.closed {
+	if 1 == this.closed {
 		return ErrServiceClosed, nil
 	}
 
@@ -655,4 +659,21 @@ func (this *AIOService) Close() {
 		this.mu.Unlock()
 		this.cond.Broadcast()
 	})
+}
+
+var defalutService *AIOService
+var createOnce sync.Once
+
+func Bind(conn net.Conn) (error, *AIOConn) {
+	createOnce.Do(func() {
+		defalutService = NewAIOService(DefaultWorkerCount)
+	})
+	return defalutService.Bind(conn)
+}
+
+func GetCompleteStatus() (err error, c *AIOConn, buff []byte, bytestransfer int, context interface{}) {
+	createOnce.Do(func() {
+		defalutService = NewAIOService(DefaultWorkerCount)
+	})
+	return defalutService.GetCompleteStatus()
 }
