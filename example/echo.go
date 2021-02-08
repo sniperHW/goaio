@@ -12,7 +12,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	//"sync/atomic"
-	//"time"
+	"time"
 )
 
 var clientcount int32
@@ -52,7 +52,7 @@ func main() {
 		for {
 			err, conn, bytestransfer, context := service.GetCompleteStatus()
 			if nil != err {
-				fmt.Println("close")
+				fmt.Println(err)
 				conn.Close()
 			} else {
 				switch context.(type) {
@@ -86,6 +86,8 @@ func main() {
 		fmt.Println("onclient")
 
 		c := service.Bind(conn)
+
+		c.SetRecvTimeout(time.Second * 5)
 
 		buff := make([]byte, 1024*4)
 

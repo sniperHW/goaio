@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -16,11 +17,9 @@ var (
 	ErrEof           = errors.New("EOF")
 	ErrRecvTimeout   = errors.New("RecvTimeout")
 	ErrSendTimeout   = errors.New("SendTimetout")
-	ErrTimeout       = errors.New("Timeout")
 	ErrConnClosed    = errors.New("conn closed")
 	ErrWatcherClosed = errors.New("watcher closed")
 	ErrUnsupportConn = errors.New("net.Conn does implement net.RawConn")
-	ErrIoPending     = errors.New("io pending")
 	ErrSendBuffNil   = errors.New("send buff is nil")
 	ErrWatchFailed   = errors.New("watch failed")
 	ErrBusy          = errors.New("busy")
@@ -34,6 +33,7 @@ const (
 
 type AIOConn struct {
 	sync.Mutex
+	nnext         TaskI
 	fd            int
 	rawconn       net.Conn
 	readable      bool
@@ -47,11 +47,15 @@ type AIOConn struct {
 	closed        bool
 	pollerVersion int32
 	closeOnce     sync.Once
+	sendTimeout   time.Duration
+	recvTimeout   time.Duration
+	timer         *Timer
 }
 
 type aioContext struct {
-	buff    []byte
-	context interface{}
+	buff     []byte
+	context  interface{}
+	deadline time.Time
 }
 
 type aioContextQueue struct {
@@ -90,6 +94,19 @@ func (this *aioContextQueue) popFront() {
 		this.queue[this.tail].buff = nil
 		this.queue[this.tail].context = nil
 		this.head = (this.head + 1) % len(this.queue)
+	}
+}
+
+func (this *aioContextQueue) setDeadline(deadline time.Time) bool {
+	if this.empty() {
+		return false
+	} else {
+		i := this.head
+		for i != this.tail {
+			this.queue[i].deadline = deadline
+			i = (i + 1) % len(this.queue)
+		}
+		return true
 	}
 }
 
@@ -137,17 +154,117 @@ func (this *aioResultList) pop() *aioResult {
 	}
 }
 
+func (this *AIOConn) GetNext() TaskI {
+	return this.nnext
+}
+
+func (this *AIOConn) SetNext(next TaskI) {
+	this.nnext = next
+}
+
 func (this *AIOConn) Close() {
 	this.closeOnce.Do(func() {
 		this.Lock()
 		defer this.Unlock()
 		this.closed = true
+
+		if nil != this.timer {
+			this.timer.Cancel()
+			this.timer = nil
+		}
+
 		runtime.SetFinalizer(this, nil)
 		if !this.doing {
 			this.doing = true
 			this.service.pushIOTask(this)
 		}
 	})
+}
+
+func (this *AIOConn) onTimeout(t *Timer) {
+	this.Lock()
+	defer this.Unlock()
+	now := time.Now()
+	if this.timer == t {
+
+		for !this.r.empty() {
+			f := this.r.front()
+			if now.After(f.deadline) {
+				this.r.popFront()
+				this.service.postCompleteStatus(this, 0, ErrRecvTimeout, f.context)
+			} else {
+				break
+			}
+		}
+
+		for !this.w.empty() {
+			f := this.w.front()
+			if now.After(f.deadline) {
+				this.w.popFront()
+				this.service.postCompleteStatus(this, 0, ErrSendTimeout, f.context)
+			} else {
+				break
+			}
+		}
+
+		var deadline time.Time
+		if !this.r.empty() && this.r.front().deadline.After(deadline) {
+			deadline = this.r.front().deadline
+		}
+
+		if !this.w.empty() && this.w.front().deadline.After(deadline) {
+			deadline = this.w.front().deadline
+		}
+
+		if !deadline.IsZero() {
+			this.timer = newTimer(now.Sub(deadline), this.onTimeout)
+		}
+
+	}
+}
+
+func (this *AIOConn) SetRecvTimeout(timeout time.Duration) {
+	this.Lock()
+	defer this.Unlock()
+	this.recvTimeout = timeout
+	if timeout != 0 {
+		deadline := time.Now().Add(timeout)
+		if this.r.setDeadline(deadline) {
+			this.timer = newTimer(timeout, this.onTimeout)
+		}
+	} else {
+		this.r.setDeadline(time.Time{})
+		if nil != this.timer {
+			this.timer.Cancel()
+			this.timer = nil
+		}
+	}
+}
+
+func (this *AIOConn) SetSendTimeout(timeout time.Duration) {
+	this.Lock()
+	defer this.Unlock()
+	this.sendTimeout = timeout
+	if timeout != 0 {
+		deadline := time.Now().Add(timeout)
+		if this.r.setDeadline(deadline) {
+			this.timer = newTimer(timeout, this.onTimeout)
+		}
+	} else {
+		this.r.setDeadline(time.Time{})
+		if nil != this.timer {
+			this.timer.Cancel()
+			this.timer = nil
+		}
+	}
+}
+
+func (this *AIOConn) getRecvTimeout() time.Duration {
+	return this.recvTimeout
+}
+
+func (this *AIOConn) getSendTimeout() time.Duration {
+	return this.sendTimeout
 }
 
 func (this *AIOConn) canRead() bool {
@@ -165,9 +282,22 @@ func (this *AIOConn) Send(buff []byte, context interface{}) error {
 	if this.closed {
 		return ErrConnClosed
 	} else {
+
+		var deadline time.Time
+
+		timeout := this.getSendTimeout()
+
+		if 0 != timeout {
+			deadline = time.Now().Add(timeout)
+			if nil == this.timer {
+				this.timer = newTimer(timeout, this.onTimeout)
+			}
+		}
+
 		if err := this.w.add(aioContext{
-			buff:    buff,
-			context: context,
+			buff:     buff,
+			context:  context,
+			deadline: deadline,
 		}); nil != err {
 			return err
 		}
@@ -189,9 +319,21 @@ func (this *AIOConn) Recv(buff []byte, context interface{}) error {
 		return ErrConnClosed
 	} else {
 
+		var deadline time.Time
+
+		timeout := this.getRecvTimeout()
+
+		if 0 != timeout {
+			deadline = time.Now().Add(timeout)
+			if nil == this.timer {
+				this.timer = newTimer(timeout, this.onTimeout)
+			}
+		}
+
 		if err := this.r.add(aioContext{
-			buff:    buff,
-			context: context,
+			buff:     buff,
+			context:  context,
+			deadline: deadline,
 		}); nil != err {
 			return err
 		}

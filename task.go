@@ -1,7 +1,6 @@
 package goaio
 
 import (
-	"container/list"
 	"errors"
 	"sync"
 )
@@ -12,12 +11,14 @@ var (
 
 type TaskI interface {
 	Do()
+	GetNext() TaskI
+	SetNext(TaskI)
 }
 
 type taskQueue struct {
 	mu        sync.Mutex
 	cond      *sync.Cond
-	l         *list.List
+	head      TaskI
 	closed    bool
 	closeOnce sync.Once
 	waitCount int
@@ -26,7 +27,6 @@ type taskQueue struct {
 func NewTaskQueue() *taskQueue {
 	q := &taskQueue{}
 	q.cond = sync.NewCond(&q.mu)
-	q.l = list.New()
 	return q
 }
 
@@ -45,7 +45,17 @@ func (this *taskQueue) push(t TaskI) error {
 		this.mu.Unlock()
 		return Error_TaskQueue_Closed
 	}
-	this.l.PushBack(t)
+
+	var head TaskI
+	if this.head == nil {
+		head = t
+	} else {
+		head = this.head.GetNext()
+		this.head.SetNext(t)
+	}
+	t.SetNext(head)
+	this.head = t
+
 	waitCount := this.waitCount
 	this.mu.Unlock()
 
@@ -58,7 +68,7 @@ func (this *taskQueue) push(t TaskI) error {
 
 func (this *taskQueue) pop() (TaskI, error) {
 	this.mu.Lock()
-	for this.l.Len() == 0 {
+	for this.head == nil {
 		if this.closed {
 			this.mu.Unlock()
 			return nil, Error_TaskQueue_Closed
@@ -69,9 +79,15 @@ func (this *taskQueue) pop() (TaskI, error) {
 		}
 	}
 
-	e := this.l.Front()
-	this.l.Remove(e)
+	e := this.head.GetNext()
+	if e == this.head {
+		this.head = nil
+	} else {
+		this.head.SetNext(e.GetNext())
+	}
+
+	e.SetNext(nil)
 
 	this.mu.Unlock()
-	return e.Value.(TaskI), nil
+	return e, nil
 }
