@@ -14,15 +14,13 @@ import (
 )
 
 var (
-	ErrEof           = errors.New("EOF")
 	ErrRecvTimeout   = errors.New("RecvTimeout")
 	ErrSendTimeout   = errors.New("SendTimetout")
 	ErrConnClosed    = errors.New("conn closed")
-	ErrWatcherClosed = errors.New("watcher closed")
+	ErrServiceClosed = errors.New("service closed")
 	ErrUnsupportConn = errors.New("net.Conn does implement net.RawConn")
-	ErrSendBuffNil   = errors.New("send buff is nil")
-	ErrWatchFailed   = errors.New("watch failed")
 	ErrBusy          = errors.New("busy")
+	ErrWatchFailed   = errors.New("watch failed")
 )
 
 const (
@@ -54,6 +52,7 @@ type AIOConn struct {
 
 type aioContext struct {
 	buff     []byte
+	offset   int
 	context  interface{}
 	deadline time.Time
 }
@@ -113,6 +112,7 @@ func (this *aioContextQueue) setDeadline(deadline time.Time) bool {
 type aioResult struct {
 	ppnext        *aioResult
 	conn          *AIOConn
+	buff          []byte
 	context       interface{}
 	err           error
 	bytestransfer int
@@ -191,7 +191,7 @@ func (this *AIOConn) onTimeout(t *Timer) {
 			f := this.r.front()
 			if now.After(f.deadline) {
 				this.r.popFront()
-				this.service.postCompleteStatus(this, 0, ErrRecvTimeout, f.context)
+				this.service.postCompleteStatus(this, f.buff, 0, ErrRecvTimeout, f.context)
 			} else {
 				break
 			}
@@ -201,7 +201,7 @@ func (this *AIOConn) onTimeout(t *Timer) {
 			f := this.w.front()
 			if now.After(f.deadline) {
 				this.w.popFront()
-				this.service.postCompleteStatus(this, 0, ErrSendTimeout, f.context)
+				this.service.postCompleteStatus(this, f.buff, 0, ErrSendTimeout, f.context)
 			} else {
 				break
 			}
@@ -380,14 +380,14 @@ func (this *AIOConn) doRead() {
 		return
 	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
 		this.r.popFront()
-		this.service.postCompleteStatus(this, size, fmt.Errorf("%d", err), c.context)
+		this.service.postCompleteStatus(this, c.buff, size, fmt.Errorf("%d", err), c.context)
 	} else if err == syscall.EAGAIN {
 		if ver == this.readableVer {
 			this.readable = false
 		}
 	} else {
 		this.r.popFront()
-		this.service.postCompleteStatus(this, size, nil, c.context)
+		this.service.postCompleteStatus(this, c.buff, size, nil, c.context)
 	}
 }
 
@@ -395,24 +395,24 @@ func (this *AIOConn) doWrite() {
 	c := this.w.front()
 	this.Unlock()
 	ver := this.writeableVer
-	size, err := syscall.Write(this.fd, c.buff)
+	size, err := syscall.Write(this.fd, c.buff[c.offset:])
 	this.Lock()
 	if err == syscall.EINTR {
 		return
 	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
 		this.w.popFront()
-		this.service.postCompleteStatus(this, size, fmt.Errorf("%d", err), c.context)
+		this.service.postCompleteStatus(this, c.buff, size, fmt.Errorf("%d", err), c.context)
 	} else if err == syscall.EAGAIN {
 		if ver == this.writeableVer {
 			this.writeable = false
 			this.service.poller.enableWrite(this)
 		}
 	} else {
-		if len(c.buff) == size {
+		if len(c.buff[c.offset:]) == size {
 			this.w.popFront()
-			this.service.postCompleteStatus(this, size, nil, c.context)
+			this.service.postCompleteStatus(this, c.buff, len(c.buff), nil, c.context)
 		} else {
-			c.buff = c.buff[size:]
+			c.offset += size
 			if ver == this.writeableVer {
 				this.writeable = false
 				this.service.poller.enableWrite(this)
@@ -429,12 +429,12 @@ func (this *AIOConn) Do() {
 	if this.closed {
 		for !this.r.empty() {
 			c := this.r.front()
-			this.service.postCompleteStatus(this, 0, ErrConnClosed, c.context)
+			this.service.postCompleteStatus(this, c.buff, 0, ErrConnClosed, c.context)
 			this.r.popFront()
 		}
 		for !this.w.empty() {
 			c := this.w.front()
-			this.service.postCompleteStatus(this, 0, ErrConnClosed, c.context)
+			this.service.postCompleteStatus(this, c.buff, 0, ErrConnClosed, c.context)
 			this.w.popFront()
 		}
 		this.service.unwatch(this)
@@ -513,18 +513,25 @@ func (this *AIOService) unwatch(c *AIOConn) {
 	this.poller.unwatch(c)
 }
 
-func (this *AIOService) Bind(conn net.Conn) *AIOConn {
+func (this *AIOService) Bind(conn net.Conn) (error, *AIOConn) {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+
+	if this.closed {
+		return ErrServiceClosed, nil
+	}
+
 	c, ok := conn.(interface {
 		SyscallConn() (syscall.RawConn, error)
 	})
 
 	if !ok {
-		return nil
+		return ErrUnsupportConn, nil
 	}
 
 	rawconn, err := c.SyscallConn()
 	if err != nil {
-		return nil
+		return err, nil
 	}
 
 	var fd int
@@ -532,7 +539,7 @@ func (this *AIOService) Bind(conn net.Conn) *AIOConn {
 	if err := rawconn.Control(func(s uintptr) {
 		fd = int(s)
 	}); err != nil {
-		return nil
+		return err, nil
 	}
 
 	syscall.SetNonblock(fd, true)
@@ -548,15 +555,13 @@ func (this *AIOService) Bind(conn net.Conn) *AIOConn {
 	}
 
 	if this.poller.watch(cc) {
-		this.mu.Lock()
 		this.conns[fd] = reflect.ValueOf(cc).Pointer()
 		runtime.SetFinalizer(cc, func(cc *AIOConn) {
 			cc.Close()
 		})
-		this.mu.Unlock()
-		return cc
+		return nil, cc
 	} else {
-		return nil
+		return ErrWatchFailed, nil
 	}
 }
 
@@ -564,11 +569,12 @@ func (this *AIOService) pushIOTask(c *AIOConn) {
 	this.tq.push(c)
 }
 
-func (this *AIOService) postCompleteStatus(c *AIOConn, bytestransfer int, err error, context interface{}) {
+func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfer int, err error, context interface{}) {
 	this.mu.Lock()
 	if this.completeQueueClosed {
 		this.mu.Unlock()
 	} else {
+
 		r := this.freeList.pop()
 		if nil == r {
 			r = &aioResult{}
@@ -577,6 +583,7 @@ func (this *AIOService) postCompleteStatus(c *AIOConn, bytestransfer int, err er
 		r.conn = c
 		r.context = context
 		r.err = err
+		r.buff = buff
 		r.bytestransfer = bytestransfer
 
 		this.completeQueue.push(r)
@@ -591,12 +598,12 @@ func (this *AIOService) postCompleteStatus(c *AIOConn, bytestransfer int, err er
 	}
 }
 
-func (this *AIOService) GetCompleteStatus() (err error, c *AIOConn, bytestransfer int, context interface{}) {
+func (this *AIOService) GetCompleteStatus() (err error, c *AIOConn, buff []byte, bytestransfer int, context interface{}) {
 	this.mu.Lock()
 
 	for this.completeQueue.empty() {
 		if this.completeQueueClosed {
-			err = ErrWatcherClosed
+			err = ErrServiceClosed
 			this.mu.Unlock()
 			return
 		}
@@ -609,8 +616,13 @@ func (this *AIOService) GetCompleteStatus() (err error, c *AIOConn, bytestransfe
 
 	err = e.err
 	c = e.conn
+	buff = e.buff
 	bytestransfer = e.bytestransfer
 	context = e.context
+
+	e.buff = nil
+	e.context = nil
+	e.conn = nil
 
 	this.freeList.push(e)
 
@@ -621,9 +633,9 @@ func (this *AIOService) GetCompleteStatus() (err error, c *AIOConn, bytestransfe
 
 func (this *AIOService) Close() {
 	this.closeOnce.Do(func() {
+		this.mu.Lock()
 		atomic.StoreInt32(&this.closed, 1)
 		this.poller.trigger()
-		this.mu.Lock()
 		/*   关闭所有AIOConn
 		 *   最终在AIOConn.Do中向所有待处理的AIO返回ErrConnClosed
 		 */

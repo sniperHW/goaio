@@ -7,28 +7,15 @@ package main
 import (
 	"fmt"
 	"github.com/sniperHW/goaio"
-	//"github.com/sniperHW/kendynet/timer"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
-	//"sync/atomic"
 	"time"
 )
 
 var clientcount int32
 var bytescount int32
 var packetcount int32
-
-/*type sendContext struct {
-	buff []byte
-}
-
-type recvContext struct {
-	buff []byte
-}*/
-
-type recvbuff []byte
-type sendbuff []byte
 
 func main() {
 
@@ -50,31 +37,22 @@ func main() {
 
 	go func() {
 		for {
-			err, conn, bytestransfer, context := service.GetCompleteStatus()
+			err, conn, buff, bytestransfer, context := service.GetCompleteStatus()
 			if nil != err {
+				if err == ErrServiceClosed {
+					return
+				}
 				fmt.Println(err)
 				conn.Close()
 			} else {
-				switch context.(type) {
-				case recvbuff:
-					//fmt.Println("send----")
-					conn.Send([]byte(context.(recvbuff))[:bytestransfer], sendbuff(context.(recvbuff)))
-				case sendbuff:
-					//fmt.Println("recv----")
-					conn.Recv([]byte(context.(sendbuff)), recvbuff(context.(sendbuff)))
+				if context.(rune) == 'r' {
+					conn.Send(buff[:bytestransfer], 'w')
+				} else {
+					conn.Recv(buff[:cap(buff)], 'r')
 				}
-
 			}
 		}
 	}()
-
-	/*timer.Repeat(time.Second, func(_ *timer.Timer, ctx interface{}) {
-		tmp1 := atomic.LoadInt32(&bytescount)
-		tmp2 := atomic.LoadInt32(&packetcount)
-		atomic.StoreInt32(&bytescount, 0)
-		atomic.StoreInt32(&packetcount, 0)
-		fmt.Printf("clientcount:%d,transrfer:%d KB/s,packetcount:%d\n", atomic.LoadInt32(&clientcount), tmp1/1024, tmp2)
-	}, nil)*/
 
 	for {
 		conn, err := ln.Accept()
@@ -83,15 +61,13 @@ func main() {
 			return
 		}
 
-		fmt.Println("onclient")
-
 		c := service.Bind(conn)
 
 		c.SetRecvTimeout(time.Second * 5)
 
 		buff := make([]byte, 1024*4)
 
-		c.Recv(buff, recvbuff(buff))
+		c.Recv(buff, 'r')
 
 	}
 
