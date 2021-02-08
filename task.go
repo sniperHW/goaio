@@ -71,6 +71,7 @@ func (this *taskQueue) pop() (TaskI, error) {
 
 	e := this.l.Front()
 	this.l.Remove(e)
+
 	this.mu.Unlock()
 	return e.Value.(TaskI), nil
 }
