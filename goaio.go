@@ -4,9 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"unsafe"
 )
 
 var (
@@ -263,8 +266,16 @@ func (this *AIOConn) doWrite() {
 			this.service.poller.enableWrite(this)
 		}
 	} else {
-		this.w.popFront()
-		this.service.postCompleteStatus(this, size, nil, c.context)
+		if len(c.buff) == size {
+			this.w.popFront()
+			this.service.postCompleteStatus(this, size, nil, c.context)
+		} else {
+			c.buff = c.buff[size:]
+			if ver == this.writeableVer {
+				this.writeable = false
+				this.service.poller.enableWrite(this)
+			}
+		}
 	}
 
 }
@@ -284,8 +295,7 @@ func (this *AIOConn) Do() {
 			this.service.postCompleteStatus(this, 0, ErrConnClosed, c.context)
 			this.w.popFront()
 		}
-
-		this.service.poller.unwatch(this)
+		this.service.unwatch(this)
 		this.rawconn.Close()
 
 	} else {
@@ -306,13 +316,18 @@ func (this *AIOConn) Do() {
 }
 
 type AIOService struct {
-	mu            sync.Mutex
-	cond          *sync.Cond
-	completeQueue aioResultList
-	freeList      aioResultList
-	tq            *taskQueue
-	poller        pollerI
-	closed        int32
+	mu                  sync.Mutex
+	cond                *sync.Cond
+	completeQueue       aioResultList
+	freeList            aioResultList
+	tq                  *taskQueue
+	poller              pollerI
+	closed              int32
+	waitCount           int
+	conns               map[int]uintptr
+	waitgroup           sync.WaitGroup
+	closeOnce           sync.Once
+	completeQueueClosed bool
 }
 
 func NewAIOService(worker int) *AIOService {
@@ -321,12 +336,14 @@ func NewAIOService(worker int) *AIOService {
 		s.cond = sync.NewCond(&s.mu)
 		s.tq = NewTaskQueue()
 		s.poller = poller
+		s.conns = map[int]uintptr{}
 		if worker <= 0 {
 			worker = 1
 		}
 
 		for i := 0; i < worker; i++ {
 			go func() {
+				s.waitgroup.Add(1)
 				for {
 					v, err := s.tq.pop()
 					if nil != err {
@@ -335,6 +352,7 @@ func NewAIOService(worker int) *AIOService {
 						v.Do()
 					}
 				}
+				s.waitgroup.Done()
 			}()
 		}
 
@@ -344,6 +362,13 @@ func NewAIOService(worker int) *AIOService {
 	} else {
 		return nil
 	}
+}
+
+func (this *AIOService) unwatch(c *AIOConn) {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+	delete(this.conns, c.fd)
+	this.poller.unwatch(c)
 }
 
 func (this *AIOService) Bind(conn net.Conn) *AIOConn {
@@ -381,9 +406,12 @@ func (this *AIOService) Bind(conn net.Conn) *AIOConn {
 	}
 
 	if this.poller.watch(cc) {
+		this.mu.Lock()
+		this.conns[fd] = reflect.ValueOf(cc).Pointer()
 		runtime.SetFinalizer(cc, func(cc *AIOConn) {
 			cc.Close()
 		})
+		this.mu.Unlock()
 		return cc
 	} else {
 		return nil
@@ -396,28 +424,43 @@ func (this *AIOService) pushIOTask(c *AIOConn) {
 
 func (this *AIOService) postCompleteStatus(c *AIOConn, bytestransfer int, err error, context interface{}) {
 	this.mu.Lock()
+	if this.completeQueueClosed {
+		this.mu.Unlock()
+	} else {
+		r := this.freeList.pop()
+		if nil == r {
+			r = &aioResult{}
+		}
 
-	r := this.freeList.pop()
-	if nil == r {
-		r = &aioResult{}
+		r.conn = c
+		r.context = context
+		r.err = err
+		r.bytestransfer = bytestransfer
+
+		this.completeQueue.push(r)
+
+		waitCount := this.waitCount
+
+		this.mu.Unlock()
+
+		if waitCount > 0 {
+			this.cond.Signal()
+		}
 	}
-
-	r.conn = c
-	r.context = context
-	r.err = err
-	r.bytestransfer = bytestransfer
-
-	this.completeQueue.push(r)
-
-	this.mu.Unlock()
-	this.cond.Signal()
 }
 
 func (this *AIOService) GetCompleteStatus() (err error, c *AIOConn, bytestransfer int, context interface{}) {
 	this.mu.Lock()
 
 	for this.completeQueue.empty() {
+		if this.completeQueueClosed {
+			err = ErrWatcherClosed
+			this.mu.Unlock()
+			return
+		}
+		this.waitCount++
 		this.cond.Wait()
+		this.waitCount--
 	}
 
 	e := this.completeQueue.pop()
@@ -432,4 +475,30 @@ func (this *AIOService) GetCompleteStatus() (err error, c *AIOConn, bytestransfe
 	this.mu.Unlock()
 
 	return
+}
+
+func (this *AIOService) Close() {
+	this.closeOnce.Do(func() {
+		atomic.StoreInt32(&this.closed, 1)
+		this.poller.trigger()
+		this.mu.Lock()
+		/*   关闭所有AIOConn
+		 *   最终在AIOConn.Do中向所有待处理的AIO返回ErrConnClosed
+		 */
+
+		for _, v := range this.conns {
+			(*AIOConn)(unsafe.Pointer(v)).Close()
+		}
+		this.mu.Unlock()
+
+		this.tq.close()
+		//等待worker处理完所有的AIOConn清理
+		this.waitgroup.Wait()
+
+		//所有的待处理的AIO在此时已经被投递到completeQueue，可以关闭completeQueue。
+		this.mu.Lock()
+		this.completeQueueClosed = true
+		this.mu.Unlock()
+		this.cond.Broadcast()
+	})
 }

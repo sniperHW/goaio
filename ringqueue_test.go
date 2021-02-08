@@ -49,6 +49,14 @@ func TestRingQueue(t *testing.T) {
 	q.add(aioContext{context: 4})
 	q.add(aioContext{context: 5})
 
+	f := q.front()
+	f.context = 11
+
+	f = q.front()
+	assert.Equal(t, 11, f.context.(int))
+
+	f.context = 1
+
 	assert.Equal(t, 1, q.front().context.(int))
 	q.popFront()
 
