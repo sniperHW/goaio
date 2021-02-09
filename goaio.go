@@ -358,12 +358,10 @@ func (this *AIOConn) onActive(ev int) {
 
 	if ev&EV_READ != 0 || ev&EV_ERROR != 0 {
 		this.readable = true
-		this.readableVer++
 	}
 
 	if ev&EV_WRITE != 0 || ev&EV_ERROR != 0 {
 		this.writeable = true
-		this.writeableVer++
 		this.service.poller.disableWrite(this)
 	}
 
@@ -376,19 +374,14 @@ func (this *AIOConn) onActive(ev int) {
 
 func (this *AIOConn) doRead() {
 	c := this.r.front()
-	//this.Unlock()
-	ver := this.readableVer
 	size, err := syscall.Read(this.fd, c.buff)
-	//this.Lock()
 	if err == syscall.EINTR {
 		return
 	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
 		this.r.popFront()
 		this.service.postCompleteStatus(this, c.buff, size, fmt.Errorf("%d", err), c.context)
 	} else if err == syscall.EAGAIN {
-		if ver == this.readableVer {
-			this.readable = false
-		}
+		this.readable = false
 	} else {
 		this.r.popFront()
 		this.service.postCompleteStatus(this, c.buff, size, nil, c.context)
@@ -397,76 +390,71 @@ func (this *AIOConn) doRead() {
 
 func (this *AIOConn) doWrite() {
 	c := this.w.front()
-	//this.Unlock()
-	ver := this.writeableVer
 	size, err := syscall.Write(this.fd, c.buff[c.offset:])
-	//this.Lock()
 	if err == syscall.EINTR {
 		return
 	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
 		this.w.popFront()
 		this.service.postCompleteStatus(this, c.buff, c.offset, fmt.Errorf("%d", err), c.context)
 	} else if err == syscall.EAGAIN {
-		if ver == this.writeableVer {
-			this.writeable = false
-			this.service.poller.enableWrite(this)
-		}
+		this.writeable = false
+		this.service.poller.enableWrite(this)
 	} else {
 		if len(c.buff[c.offset:]) == size {
 			this.w.popFront()
 			this.service.postCompleteStatus(this, c.buff, len(c.buff), nil, c.context)
 		} else {
 			c.offset += size
-			if ver == this.writeableVer {
-				this.writeable = false
-				this.service.poller.enableWrite(this)
-			}
+			this.writeable = false
+			this.service.poller.enableWrite(this)
 		}
 	}
 
 }
 
 func (this *AIOConn) Do() {
-	this.Lock()
-	defer this.Unlock()
-
-	//for {
-
-	if this.closed {
-		for !this.r.empty() {
-			c := this.r.front()
-			this.service.postCompleteStatus(this, c.buff, 0, ErrConnClosed, c.context)
-			this.r.popFront()
-		}
-		for !this.w.empty() {
-			c := this.w.front()
-			this.service.postCompleteStatus(this, c.buff, c.offset, ErrConnClosed, c.context)
-			this.w.popFront()
-		}
-		this.service.unwatch(this)
-		this.rawconn.Close()
-		return
-
-	} else {
-		if this.canRead() {
-			this.doRead()
-		}
-
-		if this.canWrite() {
-			this.doWrite()
-		}
-
-		if this.closed || this.canRead() || this.canWrite() {
-			this.service.pushIOTask(this)
-			//fmt.Println("continue")
-		} else {
-			//fmt.Println("break1")
+	trycount := 10 //如果持续可读写，循环最多执行trycount，超过之后重新pushIOTask，避免其它连接饥饿
+	for i := 0; ; i++ {
+		this.Lock()
+		if this.closed {
+			for !this.r.empty() {
+				c := this.r.front()
+				this.service.postCompleteStatus(this, c.buff, 0, ErrConnClosed, c.context)
+				this.r.popFront()
+			}
+			for !this.w.empty() {
+				c := this.w.front()
+				this.service.postCompleteStatus(this, c.buff, c.offset, ErrConnClosed, c.context)
+				this.w.popFront()
+			}
+			this.service.unwatch(this)
+			this.rawconn.Close()
 			this.doing = false
+			this.Unlock()
 			return
-			//this.doing = false
+		} else {
+
+			if this.canRead() {
+				this.doRead()
+			}
+
+			if this.canWrite() {
+				this.doWrite()
+			}
+
+			if this.canRead() || this.canWrite() {
+				this.Unlock()
+				if i >= trycount {
+					this.service.pushIOTask(this)
+					return
+				}
+			} else {
+				this.doing = false
+				this.Unlock()
+				return
+			}
 		}
 	}
-	//}
 }
 
 type AIOService struct {
