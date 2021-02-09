@@ -493,7 +493,7 @@ func NewAIOService(worker int) *AIOService {
 				for {
 					v, err := s.tq.pop()
 					if nil != err {
-						return
+						break
 					} else {
 						v.Do()
 					}
@@ -517,12 +517,12 @@ func (this *AIOService) unwatch(c *AIOConn) {
 	this.poller.unwatch(c)
 }
 
-func (this *AIOService) Bind(conn net.Conn) (error, *AIOConn) {
+func (this *AIOService) Bind(conn net.Conn) (*AIOConn, error) {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
 	if 1 == this.closed {
-		return ErrServiceClosed, nil
+		return nil, ErrServiceClosed
 	}
 
 	c, ok := conn.(interface {
@@ -530,12 +530,12 @@ func (this *AIOService) Bind(conn net.Conn) (error, *AIOConn) {
 	})
 
 	if !ok {
-		return ErrUnsupportConn, nil
+		return nil, ErrUnsupportConn
 	}
 
 	rawconn, err := c.SyscallConn()
 	if err != nil {
-		return err, nil
+		return nil, err
 	}
 
 	var fd int
@@ -543,7 +543,7 @@ func (this *AIOService) Bind(conn net.Conn) (error, *AIOConn) {
 	if err := rawconn.Control(func(s uintptr) {
 		fd = int(s)
 	}); err != nil {
-		return err, nil
+		return nil, err
 	}
 
 	syscall.SetNonblock(fd, true)
@@ -563,9 +563,9 @@ func (this *AIOService) Bind(conn net.Conn) (error, *AIOConn) {
 		runtime.SetFinalizer(cc, func(cc *AIOConn) {
 			cc.Close()
 		})
-		return nil, cc
+		return cc, nil
 	} else {
-		return ErrWatchFailed, nil
+		return nil, ErrWatchFailed
 	}
 }
 
@@ -602,7 +602,7 @@ func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfe
 	}
 }
 
-func (this *AIOService) GetCompleteStatus() (err error, c *AIOConn, buff []byte, bytestransfer int, context interface{}) {
+func (this *AIOService) GetCompleteStatus() (c *AIOConn, buff []byte, bytestransfer int, context interface{}, err error) {
 	this.mu.Lock()
 
 	for this.completeQueue.empty() {
@@ -637,6 +637,7 @@ func (this *AIOService) GetCompleteStatus() (err error, c *AIOConn, buff []byte,
 
 func (this *AIOService) Close() {
 	this.closeOnce.Do(func() {
+
 		this.mu.Lock()
 		atomic.StoreInt32(&this.closed, 1)
 		this.poller.trigger()
@@ -664,14 +665,14 @@ func (this *AIOService) Close() {
 var defalutService *AIOService
 var createOnce sync.Once
 
-func Bind(conn net.Conn) (error, *AIOConn) {
+func Bind(conn net.Conn) (*AIOConn, error) {
 	createOnce.Do(func() {
 		defalutService = NewAIOService(DefaultWorkerCount)
 	})
 	return defalutService.Bind(conn)
 }
 
-func GetCompleteStatus() (err error, c *AIOConn, buff []byte, bytestransfer int, context interface{}) {
+func GetCompleteStatus() (*AIOConn, []byte, int, interface{}, error) {
 	createOnce.Do(func() {
 		defalutService = NewAIOService(DefaultWorkerCount)
 	})
