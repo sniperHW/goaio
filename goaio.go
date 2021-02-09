@@ -376,10 +376,10 @@ func (this *AIOConn) onActive(ev int) {
 
 func (this *AIOConn) doRead() {
 	c := this.r.front()
-	this.Unlock()
+	//this.Unlock()
 	ver := this.readableVer
 	size, err := syscall.Read(this.fd, c.buff)
-	this.Lock()
+	//this.Lock()
 	if err == syscall.EINTR {
 		return
 	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
@@ -397,10 +397,10 @@ func (this *AIOConn) doRead() {
 
 func (this *AIOConn) doWrite() {
 	c := this.w.front()
-	this.Unlock()
+	//this.Unlock()
 	ver := this.writeableVer
 	size, err := syscall.Write(this.fd, c.buff[c.offset:])
-	this.Lock()
+	//this.Lock()
 	if err == syscall.EINTR {
 		return
 	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
@@ -430,6 +430,8 @@ func (this *AIOConn) Do() {
 	this.Lock()
 	defer this.Unlock()
 
+	//for {
+
 	if this.closed {
 		for !this.r.empty() {
 			c := this.r.front()
@@ -443,6 +445,7 @@ func (this *AIOConn) Do() {
 		}
 		this.service.unwatch(this)
 		this.rawconn.Close()
+		return
 
 	} else {
 		if this.canRead() {
@@ -455,10 +458,15 @@ func (this *AIOConn) Do() {
 
 		if this.closed || this.canRead() || this.canWrite() {
 			this.service.pushIOTask(this)
+			//fmt.Println("continue")
 		} else {
+			//fmt.Println("break1")
 			this.doing = false
+			return
+			//this.doing = false
 		}
 	}
+	//}
 }
 
 type AIOService struct {
@@ -554,8 +562,8 @@ func (this *AIOService) Bind(conn net.Conn) (*AIOConn, error) {
 		writeable: true,
 		rawconn:   conn,
 		service:   this,
-		r:         newAioContextQueue(100),
-		w:         newAioContextQueue(100),
+		r:         newAioContextQueue(16),
+		w:         newAioContextQueue(16),
 	}
 
 	if this.poller.watch(cc) {
