@@ -29,7 +29,7 @@ func main() {
 
 	go func() {
 		for {
-			err, conn, buff, bytestransfer, context := goaio.GetCompleteStatus()
+			conn, buff, bytestransfer, context, err := goaio.GetCompleteStatus()
 			if nil != err {
 				if err == goaio.ErrServiceClosed {
 					return
@@ -53,7 +53,7 @@ func main() {
 			return
 		}
 
-		_, c := goaio.Bind(conn)
+		c, _ := goaio.Bind(conn)
 
 		c.SetRecvTimeout(time.Second * 5)
 

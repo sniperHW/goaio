@@ -365,7 +365,7 @@ func (this *AIOConn) onActive(ev int) {
 		this.service.poller.disableWrite(this)
 	}
 
-	if !this.doing {
+	if (this.canRead() || this.canWrite()) && !this.doing {
 		this.doing = true
 		this.service.pushIOTask(this)
 	}
@@ -413,8 +413,7 @@ func (this *AIOConn) doWrite() {
 }
 
 func (this *AIOConn) Do() {
-	trycount := 10 //如果持续可读写，循环最多执行trycount，超过之后重新pushIOTask，避免其它连接饥饿
-	for i := 0; ; i++ {
+	for {
 		this.Lock()
 		if this.closed {
 			for !this.r.empty() {
@@ -444,10 +443,6 @@ func (this *AIOConn) Do() {
 
 			if this.canRead() || this.canWrite() {
 				this.Unlock()
-				if i >= trycount {
-					this.service.pushIOTask(this)
-					return
-				}
 			} else {
 				this.doing = false
 				this.Unlock()

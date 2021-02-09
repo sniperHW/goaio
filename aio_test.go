@@ -1,5 +1,6 @@
 //go test -covermode=count -v -coverprofile=coverage.out -run=.
 //go tool cover -html=coverage.out
+//ulimit -n 1048576
 package goaio
 
 import (
@@ -169,6 +170,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 				if err == ErrServiceClosed {
 					break
 				} else {
+					//fmt.Println("close conn", conn.fd)
 					conn.Close()
 					atomic.AddInt32(&clientCount, -1)
 				}
@@ -201,15 +203,15 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 				return
 			}
 
+			atomic.AddInt32(&clientCount, 1)
+
 			//c.SetRecvTimeout(time.Second)
 
 			buff := make([]byte, bufsize)
 			if err := c.Recv(buff, 'r'); nil != err {
-				fmt.Println("first recv", err)
-			} else {
-				atomic.AddInt32(&clientCount, 1)
+				fmt.Println("first recv", err, "fd", c.fd)
+				panic("panic")
 			}
-
 		}
 	}()
 	return ln, die
@@ -887,7 +889,7 @@ func BenchmarkEcho64KParallel(b *testing.B) {
 
 */
 func BenchmarkEcho128KParallel(b *testing.B) {
-	benchmarkEcho(b, 128*1024, 32)
+	benchmarkEcho(b, 128*1024, 128)
 }
 
 func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
