@@ -550,8 +550,8 @@ func (this *AIOService) Bind(conn net.Conn) (*AIOConn, error) {
 		writeable: true,
 		rawconn:   conn,
 		service:   this,
-		r:         newAioContextQueue(16),
-		w:         newAioContextQueue(16),
+		r:         newAioContextQueue(64),
+		w:         newAioContextQueue(64),
 	}
 
 	if this.poller.watch(cc) {

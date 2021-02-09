@@ -201,7 +201,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 				return
 			}
 
-			c.SetRecvTimeout(time.Second)
+			//c.SetRecvTimeout(time.Second)
 
 			buff := make([]byte, bufsize)
 			if err := c.Recv(buff, 'r'); nil != err {
