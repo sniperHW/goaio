@@ -33,6 +33,17 @@ var (
 	DefaultWorkerCount = 4
 )
 
+type ShareBuffer interface {
+	Acquire() []byte
+	Release([]byte)
+}
+
+type AIOConnOption struct {
+	sendqueSize int
+	recvqueSize int
+	sharebuff   ShareBuffer
+}
+
 type AIOConn struct {
 	sync.Mutex
 	nnext         *AIOConn
@@ -53,6 +64,7 @@ type AIOConn struct {
 	recvTimeout   time.Duration
 	timer         *Timer
 	reason        error
+	sharebuff     ShareBuffer
 }
 
 type aioContext struct {
@@ -69,6 +81,9 @@ type aioContextQueue struct {
 }
 
 func newAioContextQueue(max int) *aioContextQueue {
+	if max == 0 {
+		max = 32
+	}
 	return &aioContextQueue{
 		queue: make([]aioContext, max+1, max+1),
 	}
@@ -456,7 +471,14 @@ func (this *AIOConn) doRead() {
 	c := this.r.front()
 	ver := this.readableVer
 	this.Unlock()
-	size, err := syscall.Read(this.fd, c.buff)
+	var buff []byte
+	if nil != this.sharebuff {
+		buff = this.sharebuff.Acquire()
+	} else {
+		buff = c.buff
+	}
+
+	size, err := syscall.Read(this.fd, buff)
 	this.Lock()
 	if err == syscall.EINTR {
 		return
@@ -465,14 +487,25 @@ func (this *AIOConn) doRead() {
 		if size == 0 {
 			err = ErrEof
 		}
-		this.service.postCompleteStatus(this, c.buff, size, err, c.context)
+
+		if nil != this.sharebuff {
+			this.sharebuff.Release(buff)
+			buff = nil
+		}
+
+		this.service.postCompleteStatus(this, buff, size, err, c.context)
 	} else if err == syscall.EAGAIN {
 		if ver == this.readableVer {
 			this.readable = false
 		}
+
+		if nil != this.sharebuff {
+			this.sharebuff.Release(buff)
+		}
+
 	} else {
 		this.r.popFront()
-		this.service.postCompleteStatus(this, c.buff, size, nil, c.context)
+		this.service.postCompleteStatus(this, buff, size, nil, c.context)
 	}
 }
 
@@ -599,7 +632,7 @@ func (this *AIOService) unwatch(c *AIOConn) {
 	this.poller.unwatch(c)
 }
 
-func (this *AIOService) Bind(conn net.Conn) (*AIOConn, error) {
+func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
 	this.Lock()
 	defer this.Unlock()
 
@@ -636,8 +669,9 @@ func (this *AIOService) Bind(conn net.Conn) (*AIOConn, error) {
 		writeable: true,
 		rawconn:   conn,
 		service:   this,
-		r:         newAioContextQueue(64),
-		w:         newAioContextQueue(64),
+		sharebuff: option.sharebuff,
+		r:         newAioContextQueue(option.recvqueSize),
+		w:         newAioContextQueue(option.sendqueSize),
 	}
 
 	if this.poller.watch(cc) {
@@ -689,11 +723,11 @@ func (this *AIOService) Close() {
 var defalutService *AIOService
 var createOnce sync.Once
 
-func Bind(conn net.Conn) (*AIOConn, error) {
+func Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
 	createOnce.Do(func() {
 		defalutService = NewAIOService(DefaultWorkerCount)
 	})
-	return defalutService.Bind(conn)
+	return defalutService.Bind(conn, option)
 }
 
 func GetCompleteStatus() (*AIOConn, []byte, int, interface{}, error) {

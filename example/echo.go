@@ -53,7 +53,7 @@ func main() {
 			return
 		}
 
-		c, _ := goaio.Bind(conn)
+		c, _ := goaio.Bind(conn, goaio.AIOConnOption{})
 
 		c.SetRecvTimeout(time.Second * 5)
 

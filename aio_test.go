@@ -202,7 +202,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}, *int) {
 				return
 			}
 
-			c, err := w.Bind(conn)
+			c, err := w.Bind(conn, AIOConnOption{})
 			if err != nil {
 				panic(err)
 				w.Close()
@@ -252,7 +252,7 @@ func TestRecvTimeout1(t *testing.T) {
 
 	w := NewAIOService(1)
 
-	c, err := w.Bind(conn)
+	c, err := w.Bind(conn, AIOConnOption{})
 
 	if nil != err {
 		t.Fatal(err)
@@ -320,7 +320,7 @@ func TestRecvTimeout2(t *testing.T) {
 
 	w := NewAIOService(1)
 
-	c, err := w.Bind(conn)
+	c, err := w.Bind(conn, AIOConnOption{})
 
 	if nil != err {
 		t.Fatal(err)
@@ -400,7 +400,7 @@ func TestSendTimeout1(t *testing.T) {
 
 	w := NewAIOService(1)
 
-	c, err := w.Bind(conn)
+	c, err := w.Bind(conn, AIOConnOption{})
 
 	if nil != err {
 		t.Fatal(err)
@@ -467,7 +467,7 @@ func TestSendTimeout2(t *testing.T) {
 
 	w := NewAIOService(0)
 
-	c, err := w.Bind(conn)
+	c, err := w.Bind(conn, AIOConnOption{})
 
 	if nil != err {
 		t.Fatal(err)
@@ -655,7 +655,7 @@ func testParallel(t *testing.T, par int, msgsize int) {
 				log.Fatal(err)
 			}
 
-			c, err := w.Bind(conn)
+			c, err := w.Bind(conn, AIOConnOption{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -894,7 +894,7 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 			return
 		}
 
-		c, err := w.Bind(conn)
+		c, err := w.Bind(conn, AIOConnOption{})
 		if err != nil {
 			b.Fatal(err)
 		}
