@@ -2,10 +2,7 @@ package goaio
 
 import (
 	"errors"
-	//"fmt"
 	"net"
-	//"reflect"
-	//"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -23,7 +20,7 @@ var (
 	ErrBusy          = errors.New("busy")
 	ErrWatchFailed   = errors.New("watch failed")
 	ErrActiveClose   = errors.New("active close")
-	ErrCloseByGC     = errors.New("close by gc")
+	ErrCloseNone     = errors.New("close no reason")
 )
 
 const (
@@ -38,7 +35,7 @@ var (
 
 type AIOConn struct {
 	sync.Mutex
-	nnext         TaskI
+	nnext         *AIOConn
 	fd            int
 	rawconn       net.Conn
 	readable      bool
@@ -55,7 +52,6 @@ type AIOConn struct {
 	sendTimeout   time.Duration
 	recvTimeout   time.Duration
 	timer         *Timer
-	key           interface{}
 	reason        error
 }
 
@@ -247,28 +243,20 @@ func (this *completetionQueue) getCompleteStatus() (c *AIOConn, buff []byte, byt
 	return
 }
 
-func (this *AIOConn) GetNext() TaskI {
-	return this.nnext
-}
-
-func (this *AIOConn) SetNext(next TaskI) {
-	this.nnext = next
-}
-
 func (this *AIOConn) Close(reason error) {
 	this.closeOnce.Do(func() {
-		//fmt.Println("close AIOConn", this.fd, this.key, reason)
 		this.Lock()
 		defer this.Unlock()
 		this.closed = true
+		if nil == reason {
+			reason = ErrCloseNone
+		}
 		this.reason = reason
 
 		if nil != this.timer {
 			this.timer.Cancel()
 			this.timer = nil
 		}
-
-		//runtime.SetFinalizer(this, nil)
 		if !this.doing {
 			this.doing = true
 			this.service.pushIOTask(this)
@@ -442,28 +430,6 @@ func (this *AIOConn) Recv(buff []byte, context interface{}) error {
 	}
 }
 
-/*
-func (this *AIOConn) onActive(ev int) {
-
-	this.Lock()
-	defer this.Unlock()
-
-	if ev&EV_READ != 0 || ev&EV_ERROR != 0 {
-		this.readable = true
-	}
-
-	if ev&EV_WRITE != 0 || ev&EV_ERROR != 0 {
-		this.writeable = true
-		this.service.poller.disableWrite(this)
-	}
-
-	if (this.canRead() || this.canWrite()) && !this.doing {
-		this.doing = true
-		this.service.pushIOTask(this)
-	}
-
-}*/
-
 func (this *AIOConn) onActive(ev int) {
 
 	this.Lock()
@@ -484,96 +450,7 @@ func (this *AIOConn) onActive(ev int) {
 		this.doing = true
 		this.service.pushIOTask(this)
 	}
-
 }
-
-/*
-func (this *AIOConn) doRead() {
-	c := this.r.front()
-	size, err := syscall.Read(this.fd, c.buff)
-	if err == syscall.EINTR {
-		return
-	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
-		this.r.popFront()
-		if size == 0 {
-			err = ErrEof
-		}
-		this.service.postCompleteStatus(this, c.buff, size, err, c.context)
-	} else if err == syscall.EAGAIN {
-		this.readable = false
-	} else {
-		this.r.popFront()
-		this.service.postCompleteStatus(this, c.buff, size, nil, c.context)
-	}
-}
-
-func (this *AIOConn) doWrite() {
-	c := this.w.front()
-	size, err := syscall.Write(this.fd, c.buff[c.offset:])
-	if err == syscall.EINTR {
-		return
-	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
-		this.w.popFront()
-		if size == 0 {
-			err = ErrEof
-		}
-		this.service.postCompleteStatus(this, c.buff, c.offset, err, c.context)
-	} else if err == syscall.EAGAIN {
-		this.writeable = false
-		this.service.poller.enableWrite(this)
-	} else {
-		if len(c.buff[c.offset:]) == size {
-			this.w.popFront()
-			this.service.postCompleteStatus(this, c.buff, len(c.buff), nil, c.context)
-		} else {
-			c.offset += size
-			this.writeable = false
-			this.service.poller.enableWrite(this)
-		}
-	}
-
-}
-
-func (this *AIOConn) Do() {
-	for {
-		this.Lock()
-		if this.closed {
-			for !this.r.empty() {
-				c := this.r.front()
-				this.service.postCompleteStatus(this, c.buff, 0, this.reason, c.context)
-				this.r.popFront()
-			}
-			for !this.w.empty() {
-				c := this.w.front()
-				this.service.postCompleteStatus(this, c.buff, c.offset, this.reason, c.context)
-				this.w.popFront()
-			}
-			this.service.unwatch(this)
-			this.rawconn.Close()
-			this.doing = false
-			this.Unlock()
-			//fmt.Println("clear AIOConn", this.fd, this.key)
-			return
-		} else {
-
-			if this.canRead() {
-				this.doRead()
-			}
-
-			if this.canWrite() {
-				this.doWrite()
-			}
-
-			if this.canRead() || this.canWrite() {
-				this.Unlock()
-			} else {
-				this.doing = false
-				this.Unlock()
-				return
-			}
-		}
-	}
-}*/
 
 func (this *AIOConn) doRead() {
 	c := this.r.front()
@@ -722,7 +599,7 @@ func (this *AIOService) unwatch(c *AIOConn) {
 	this.poller.unwatch(c)
 }
 
-func (this *AIOService) Bind(conn net.Conn, key interface{}) (*AIOConn, error) {
+func (this *AIOService) Bind(conn net.Conn) (*AIOConn, error) {
 	this.Lock()
 	defer this.Unlock()
 
@@ -761,15 +638,10 @@ func (this *AIOService) Bind(conn net.Conn, key interface{}) (*AIOConn, error) {
 		service:   this,
 		r:         newAioContextQueue(64),
 		w:         newAioContextQueue(64),
-		key:       key,
 	}
 
 	if this.poller.watch(cc) {
 		this.conns[fd] = cc
-		/*runtime.SetFinalizer(cc, func(c *AIOConn) {
-			fmt.Println("GC")
-			c.Close(ErrCloseByGC)
-		})*/
 		return cc, nil
 	} else {
 		return nil, ErrWatchFailed
@@ -790,9 +662,6 @@ func (this *AIOService) GetCompleteStatus() (*AIOConn, []byte, int, interface{},
 
 func (this *AIOService) Close() {
 	this.closeOnce.Do(func() {
-
-		//fmt.Println("close AIOService")
-
 		this.Lock()
 		atomic.StoreInt32(&this.closed, 1)
 		this.poller.trigger()
@@ -820,11 +689,11 @@ func (this *AIOService) Close() {
 var defalutService *AIOService
 var createOnce sync.Once
 
-func Bind(conn net.Conn, key interface{}) (*AIOConn, error) {
+func Bind(conn net.Conn) (*AIOConn, error) {
 	createOnce.Do(func() {
 		defalutService = NewAIOService(DefaultWorkerCount)
 	})
-	return defalutService.Bind(conn, key)
+	return defalutService.Bind(conn)
 }
 
 func GetCompleteStatus() (*AIOConn, []byte, int, interface{}, error) {

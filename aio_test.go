@@ -1,6 +1,7 @@
 //go test -covermode=count -v -coverprofile=coverage.out -run=.
 //go tool cover -html=coverage.out
 //ulimit -n 1048576
+//go test -v -run=^$ -bench BenchmarkEcho128KParallel -count 100
 package goaio
 
 import (
@@ -180,14 +181,8 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}, *int) {
 				if context.(rune) == 'r' {
 					recvsize += bytestransfer
 					conn.Send(buff[:bytestransfer], 'w')
-					//if nil != conn.Send(buff[:bytestransfer], 'w') {
-					//	atomic.AddInt32(&clientCount, -1)
-					//}
 				} else {
 					conn.Recv(buff[:cap(buff)], 'r')
-					//if nil != conn.Recv(buff[:cap(buff)], 'r') {
-					//	atomic.AddInt32(&clientCount, -1)
-					//}
 				}
 			}
 
@@ -207,7 +202,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}, *int) {
 				return
 			}
 
-			c, err := w.Bind(conn, "server")
+			c, err := w.Bind(conn)
 			if err != nil {
 				panic(err)
 				w.Close()
@@ -257,7 +252,7 @@ func TestRecvTimeout1(t *testing.T) {
 
 	w := NewAIOService(1)
 
-	c, err := w.Bind(conn, nil)
+	c, err := w.Bind(conn)
 
 	if nil != err {
 		t.Fatal(err)
@@ -325,7 +320,7 @@ func TestRecvTimeout2(t *testing.T) {
 
 	w := NewAIOService(1)
 
-	c, err := w.Bind(conn, nil)
+	c, err := w.Bind(conn)
 
 	if nil != err {
 		t.Fatal(err)
@@ -372,44 +367,6 @@ func TestRecvTimeout2(t *testing.T) {
 
 }
 
-/*
-func TestGC(t *testing.T) {
-	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
-	if err != nil {
-		panic(err.Error())
-	}
-
-	ln, err := net.ListenTCP("tcp", tcpAddr)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	conn.(*net.TCPConn).SetWriteBuffer(4096)
-
-	w := NewAIOService(1)
-
-	_, err := w.Bind(conn, nil)
-
-	if nil != err {
-		t.Fatal(err)
-	}
-
-	for i := 0; i < 3; i++ {
-		time.Sleep(time.Second)
-		runtime.GC()
-	}
-
-
-	ln.Close()
-	w.Close()
-
-}*/
-
 func TestSendTimeout1(t *testing.T) {
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
@@ -443,7 +400,7 @@ func TestSendTimeout1(t *testing.T) {
 
 	w := NewAIOService(1)
 
-	c, err := w.Bind(conn, nil)
+	c, err := w.Bind(conn)
 
 	if nil != err {
 		t.Fatal(err)
@@ -510,7 +467,7 @@ func TestSendTimeout2(t *testing.T) {
 
 	w := NewAIOService(0)
 
-	c, err := w.Bind(conn, nil)
+	c, err := w.Bind(conn)
 
 	if nil != err {
 		t.Fatal(err)
@@ -698,7 +655,7 @@ func testParallel(t *testing.T, par int, msgsize int) {
 				log.Fatal(err)
 			}
 
-			c, err := w.Bind(conn, "client")
+			c, err := w.Bind(conn)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -902,7 +859,7 @@ func BenchmarkEcho64KParallel(b *testing.B) {
 
 */
 func BenchmarkEcho128KParallel(b *testing.B) {
-	benchmarkEcho(b, 128*1024, 32)
+	benchmarkEcho(b, 128*1024, 128)
 }
 
 func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
@@ -937,7 +894,7 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 			return
 		}
 
-		c, err := w.Bind(conn, "client")
+		c, err := w.Bind(conn)
 		if err != nil {
 			b.Fatal(err)
 		}

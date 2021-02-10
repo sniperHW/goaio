@@ -9,11 +9,8 @@ import (
 )
 
 type epoll struct {
-	fd        int
-	wfd       int // wake fd
-	fd2Conn   fd2Conn
-	ver       int64
-	closeOnce sync.Once
+	poller_base
+	wfd int // wake fd
 }
 
 func openPoller() (*epoll, error) {
@@ -75,19 +72,8 @@ func (p *epoll) watch(conn *AIOConn) bool {
 		return false
 	}
 
-	var pollerVersion int32
+	conn.pollerVersion = p.updatePollerVersionOnWatch()
 
-	for {
-		ver := atomic.LoadInt64(&p.ver)
-		addVer := int32(ver>>32) + 1
-		pollerVersion = int32(ver & 0x00000000FFFFFFFF)
-		nextVer := int64(addVer<<32) | int64(pollerVersion)
-		if atomic.CompareAndSwapInt64(&p.ver, ver, nextVer) {
-			break
-		}
-	}
-
-	conn.pollerVersion = pollerVersion
 	p.fd2Conn.add(conn)
 
 	err := syscall.EpollCtl(p.fd, syscall.EPOLL_CTL_ADD, int(conn.fd), &syscall.EpollEvent{Fd: int32(conn.fd), Events: syscall.EPOLLRDHUP | syscall.EPOLLIN | /*syscall.EPOLLOUT |*/ EPOLLET})
@@ -142,17 +128,7 @@ func (p *epoll) wait(stoped *int32) {
 			return
 		}
 
-		var pollerVersion int32
-
-		for {
-			ver := atomic.LoadInt64(&p.ver)
-			addVer := int32(ver >> 32)
-			pollerVersion = int32(ver&0x00000000FFFFFFFF) + 1
-			nextVer := int64(addVer<<32) | int64(pollerVersion)
-			if atomic.CompareAndSwapInt64(&p.ver, ver, nextVer) {
-				break
-			}
-		}
+		pollerVersion := p.updatePollerVersionOnWait()
 
 		for i := 0; i < n; i++ {
 
@@ -194,6 +170,5 @@ func (p *epoll) wait(stoped *int32) {
 		if n == len(eventlist) {
 			eventlist = make([]syscall.EpollEvent, n<<1)
 		}
-
 	}
 }

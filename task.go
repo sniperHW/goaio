@@ -9,16 +9,10 @@ var (
 	Error_TaskQueue_Closed = errors.New("task queue closed")
 )
 
-type TaskI interface {
-	Do()
-	GetNext() TaskI
-	SetNext(TaskI)
-}
-
 type taskQueue struct {
 	mu        sync.Mutex
 	cond      *sync.Cond
-	head      TaskI
+	head      *AIOConn
 	closed    bool
 	closeOnce sync.Once
 	waitCount int
@@ -39,21 +33,21 @@ func (this *taskQueue) close() {
 	})
 }
 
-func (this *taskQueue) push(t TaskI) error {
+func (this *taskQueue) push(t *AIOConn) error {
 	this.mu.Lock()
 	if this.closed {
 		this.mu.Unlock()
 		return Error_TaskQueue_Closed
 	}
 
-	var head TaskI
+	var head *AIOConn
 	if this.head == nil {
 		head = t
 	} else {
-		head = this.head.GetNext()
-		this.head.SetNext(t)
+		head = this.head.nnext
+		this.head.nnext = t
 	}
-	t.SetNext(head)
+	t.nnext = head
 	this.head = t
 
 	waitCount := this.waitCount
@@ -66,7 +60,7 @@ func (this *taskQueue) push(t TaskI) error {
 	return nil
 }
 
-func (this *taskQueue) pop() (TaskI, error) {
+func (this *taskQueue) pop() (*AIOConn, error) {
 	this.mu.Lock()
 	for this.head == nil {
 		if this.closed {
@@ -79,14 +73,14 @@ func (this *taskQueue) pop() (TaskI, error) {
 		}
 	}
 
-	e := this.head.GetNext()
+	e := this.head.nnext
 	if e == this.head {
 		this.head = nil
 	} else {
-		this.head.SetNext(e.GetNext())
+		this.head.nnext = e.nnext
 	}
 
-	e.SetNext(nil)
+	e.nnext = nil
 
 	this.mu.Unlock()
 
