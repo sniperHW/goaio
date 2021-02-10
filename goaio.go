@@ -2,6 +2,7 @@ package goaio
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -44,6 +45,9 @@ type AIOConnOption struct {
 	sharebuff   ShareBuffer
 }
 
+const max_send_size = 1024 * 256
+const max_send_iovec_size = 512
+
 type AIOConn struct {
 	sync.Mutex
 	nnext         *AIOConn
@@ -65,6 +69,7 @@ type AIOConn struct {
 	timer         *Timer
 	reason        error
 	sharebuff     ShareBuffer
+	send_iovec    []syscall.Iovec
 }
 
 type aioContext struct {
@@ -81,9 +86,6 @@ type aioContextQueue struct {
 }
 
 func newAioContextQueue(max int) *aioContextQueue {
-	if max == 0 {
-		max = 32
-	}
 	return &aioContextQueue{
 		queue: make([]aioContext, max+1, max+1),
 	}
@@ -113,6 +115,28 @@ func (this *aioContextQueue) popFront() {
 		this.queue[this.tail].buff = nil
 		this.queue[this.tail].context = nil
 		this.head = (this.head + 1) % len(this.queue)
+	}
+}
+
+func (this *aioContextQueue) packIovec(iovec *[]syscall.Iovec) (int, int) {
+	if this.empty() {
+		return 0, 0
+	} else {
+		cc := 0
+		total := 0
+		o := 0
+		for i := this.head; ; {
+			b := &this.queue[this.head]
+			size := len(b.buff) - b.offset
+			(*iovec)[o] = syscall.Iovec{&b.buff[b.offset], uint64(size)}
+			total += size
+			cc++
+			i = (i + 1) % len(this.queue)
+			if i == this.tail || total >= max_send_size || cc >= len(*iovec) || cc >= max_send_iovec_size {
+				break
+			}
+		}
+		return cc, total
 	}
 }
 
@@ -284,7 +308,6 @@ func (this *AIOConn) onTimeout(t *Timer) {
 	defer this.Unlock()
 	now := time.Now()
 	if this.timer == t {
-
 		for !this.r.empty() {
 			f := this.r.front()
 			if now.After(f.deadline) {
@@ -483,7 +506,6 @@ func (this *AIOConn) doRead() {
 	if err == syscall.EINTR {
 		return
 	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
-		this.r.popFront()
 		if size == 0 {
 			err = ErrEof
 		}
@@ -493,7 +515,12 @@ func (this *AIOConn) doRead() {
 			buff = nil
 		}
 
-		this.service.postCompleteStatus(this, buff, size, err, c.context)
+		for !this.r.empty() {
+			c := this.r.front()
+			this.service.postCompleteStatus(this, c.buff, 0, err, c.context)
+			this.r.popFront()
+		}
+
 	} else if err == syscall.EAGAIN {
 		if ver == this.readableVer {
 			this.readable = false
@@ -510,30 +537,41 @@ func (this *AIOConn) doRead() {
 }
 
 func (this *AIOConn) doWrite() {
-	c := this.w.front()
 	ver := this.writeableVer
+	cc, total := this.w.packIovec(&this.send_iovec)
 	this.Unlock()
-	size, err := syscall.Write(this.fd, c.buff[c.offset:])
+	nwRaw, _, errno := syscall.Syscall(syscall.SYS_WRITEV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.send_iovec[0])), uintptr(cc))
+	size := int(nwRaw)
 	this.Lock()
-	if err == syscall.EINTR {
+	if errno == syscall.EINTR {
 		return
-	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
-		this.w.popFront()
-		if size == 0 {
-			err = ErrEof
+	} else if errno != 0 && errno != syscall.EAGAIN {
+		err := fmt.Errorf("send error errno:%d", errno)
+		for !this.w.empty() {
+			c := this.w.front()
+			this.service.postCompleteStatus(this, c.buff, c.offset, err, c.context)
+			this.w.popFront()
 		}
-		this.service.postCompleteStatus(this, c.buff, c.offset, err, c.context)
-	} else if err == syscall.EAGAIN {
+	} else if errno == syscall.EAGAIN {
 		if ver == this.writeableVer {
 			this.writeable = false
 			this.service.poller.enableWrite(this)
 		}
 	} else {
-		if len(c.buff[c.offset:]) == size {
-			this.w.popFront()
-			this.service.postCompleteStatus(this, c.buff, len(c.buff), nil, c.context)
-		} else {
-			c.offset += size
+		remain := size
+		for remain > 0 {
+			c := this.w.front()
+			if remain >= len(c.buff[c.offset:]) {
+				this.service.postCompleteStatus(this, c.buff, len(c.buff), nil, c.context)
+				this.w.popFront()
+				remain -= len(c.buff[c.offset:])
+			} else {
+				c.offset += remain
+				remain = 0
+			}
+		}
+
+		if size < total {
 			if ver == this.writeableVer {
 				this.writeable = false
 				this.service.poller.enableWrite(this)
@@ -663,6 +701,14 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 
 	syscall.SetNonblock(fd, true)
 
+	if option.recvqueSize <= 0 {
+		option.recvqueSize = 32
+	}
+
+	if option.sendqueSize <= 0 {
+		option.sendqueSize = 32
+	}
+
 	cc := &AIOConn{
 		fd:        fd,
 		readable:  true,
@@ -672,6 +718,12 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 		sharebuff: option.sharebuff,
 		r:         newAioContextQueue(option.recvqueSize),
 		w:         newAioContextQueue(option.sendqueSize),
+	}
+
+	if option.sendqueSize < max_send_iovec_size {
+		cc.send_iovec = make([]syscall.Iovec, option.sendqueSize)
+	} else {
+		cc.send_iovec = make([]syscall.Iovec, max_send_iovec_size)
 	}
 
 	if this.poller.watch(cc) {

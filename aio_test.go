@@ -273,6 +273,7 @@ func TestRecvTimeout1(t *testing.T) {
 	for {
 		conn, _, _, _, err := w.GetCompleteStatus()
 		if nil != err {
+			fmt.Println(err)
 			if err != ErrRecvTimeout {
 				panic("err type mismatch")
 			}
