@@ -89,5 +89,6 @@ func (this *taskQueue) pop() (TaskI, error) {
 	e.SetNext(nil)
 
 	this.mu.Unlock()
+
 	return e, nil
 }

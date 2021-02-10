@@ -14,7 +14,7 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
-	"runtime"
+	//"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -145,7 +145,7 @@ func echoServerUsePool(t testing.TB, bufsize int) (net.Listener, chan struct{}) 
 	return ln, die
 }*/
 
-func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
+func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}, *int) {
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	if err != nil {
@@ -163,6 +163,8 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 
 	var clientCount int32
 
+	recvsize := 0
+
 	go func() {
 		for {
 			conn, buff, bytestransfer, context, err := w.GetCompleteStatus()
@@ -170,15 +172,22 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 				if err == ErrServiceClosed {
 					break
 				} else {
-					//fmt.Println("close conn", conn.fd)
-					conn.Close()
+					//fmt.Println("close conn", conn.fd, err)
+					conn.Close(err)
 					atomic.AddInt32(&clientCount, -1)
 				}
 			} else {
 				if context.(rune) == 'r' {
+					recvsize += bytestransfer
 					conn.Send(buff[:bytestransfer], 'w')
+					//if nil != conn.Send(buff[:bytestransfer], 'w') {
+					//	atomic.AddInt32(&clientCount, -1)
+					//}
 				} else {
 					conn.Recv(buff[:cap(buff)], 'r')
+					//if nil != conn.Recv(buff[:cap(buff)], 'r') {
+					//	atomic.AddInt32(&clientCount, -1)
+					//}
 				}
 			}
 
@@ -186,6 +195,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 				break
 			}
 		}
+		//fmt.Println("server break")
 		w.Close()
 		close(die)
 	}()
@@ -197,8 +207,9 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 				return
 			}
 
-			c, err := w.Bind(conn)
+			c, err := w.Bind(conn, "server")
 			if err != nil {
+				panic(err)
 				w.Close()
 				return
 			}
@@ -214,7 +225,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 			}
 		}
 	}()
-	return ln, die
+	return ln, die, &recvsize
 }
 
 func TestRecvTimeout1(t *testing.T) {
@@ -246,7 +257,7 @@ func TestRecvTimeout1(t *testing.T) {
 
 	w := NewAIOService(1)
 
-	c, err := w.Bind(conn)
+	c, err := w.Bind(conn, nil)
 
 	if nil != err {
 		t.Fatal(err)
@@ -272,7 +283,7 @@ func TestRecvTimeout1(t *testing.T) {
 			}
 			count++
 			if count == 2 {
-				conn.Close()
+				conn.Close(ErrActiveClose)
 				break
 			}
 		}
@@ -314,7 +325,7 @@ func TestRecvTimeout2(t *testing.T) {
 
 	w := NewAIOService(1)
 
-	c, err := w.Bind(conn)
+	c, err := w.Bind(conn, nil)
 
 	if nil != err {
 		t.Fatal(err)
@@ -361,6 +372,7 @@ func TestRecvTimeout2(t *testing.T) {
 
 }
 
+/*
 func TestGC(t *testing.T) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	if err != nil {
@@ -381,7 +393,7 @@ func TestGC(t *testing.T) {
 
 	w := NewAIOService(1)
 
-	_, err = w.Bind(conn)
+	_, err := w.Bind(conn, nil)
 
 	if nil != err {
 		t.Fatal(err)
@@ -392,10 +404,11 @@ func TestGC(t *testing.T) {
 		runtime.GC()
 	}
 
+
 	ln.Close()
 	w.Close()
 
-}
+}*/
 
 func TestSendTimeout1(t *testing.T) {
 
@@ -430,7 +443,7 @@ func TestSendTimeout1(t *testing.T) {
 
 	w := NewAIOService(1)
 
-	c, err := w.Bind(conn)
+	c, err := w.Bind(conn, nil)
 
 	if nil != err {
 		t.Fatal(err)
@@ -450,7 +463,7 @@ func TestSendTimeout1(t *testing.T) {
 			if err != ErrSendTimeout {
 				panic("err type mismatch")
 			}
-			conn.Close()
+			conn.Close(err)
 			break
 		} else {
 			c.Send(wx, 'w')
@@ -497,7 +510,7 @@ func TestSendTimeout2(t *testing.T) {
 
 	w := NewAIOService(0)
 
-	c, err := w.Bind(conn)
+	c, err := w.Bind(conn, nil)
 
 	if nil != err {
 		t.Fatal(err)
@@ -549,7 +562,7 @@ func TestSendTimeout2(t *testing.T) {
 }
 
 func TestEchoTiny(t *testing.T) {
-	ln, serverDie := echoServer(t, 4096)
+	ln, serverDie, _ := echoServer(t, 4096)
 
 	defer func() {
 		ln.Close()
@@ -579,7 +592,7 @@ func TestEchoTiny(t *testing.T) {
 }
 
 func TestEchoHuge(t *testing.T) {
-	ln, serverDie := echoServer(t, 4096)
+	ln, serverDie, _ := echoServer(t, 4096)
 
 	defer func() {
 		ln.Close()
@@ -660,7 +673,7 @@ func Test2kTiny(t *testing.T) {
 
 func testParallel(t *testing.T, par int, msgsize int) {
 	t.Log("testing concurrent:", par, "connections")
-	ln, serverDie := echoServer(t, msgsize)
+	ln, serverDie, _ := echoServer(t, msgsize)
 	defer func() {
 		t.Log("wait server finish")
 		ln.Close()
@@ -685,7 +698,7 @@ func testParallel(t *testing.T, par int, msgsize int) {
 				log.Fatal(err)
 			}
 
-			c, err := w.Bind(conn)
+			c, err := w.Bind(conn, "client")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -702,7 +715,7 @@ func testParallel(t *testing.T, par int, msgsize int) {
 		<-die
 
 		for _, v := range conns {
-			v.Close()
+			v.Close(ErrActiveClose)
 		}
 
 		close(ok)
@@ -720,7 +733,7 @@ func testParallel(t *testing.T, par int, msgsize int) {
 				if err == ErrServiceClosed {
 					break
 				} else {
-					conn.Close()
+					conn.Close(err)
 				}
 			} else {
 				if context.(rune) == 'r' {
@@ -889,14 +902,16 @@ func BenchmarkEcho64KParallel(b *testing.B) {
 
 */
 func BenchmarkEcho128KParallel(b *testing.B) {
-	benchmarkEcho(b, 128*1024, 128)
+	benchmarkEcho(b, 128*1024, 32)
 }
 
 func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 
 	b.Log("benchmark echo with message size:", bufsize, "with", numconn, "parallel connections, for", b.N, "times")
 
-	ln, serverDie := echoServer(b, bufsize)
+	//fmt.Println("\n------begin----------------")
+
+	ln, serverDie, _ := echoServer(b, bufsize)
 	defer func() {
 		ln.Close()
 		//fmt.Println(1)
@@ -922,14 +937,14 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 			return
 		}
 
-		c, err := w.Bind(conn)
+		c, err := w.Bind(conn, "client")
 		if err != nil {
 			b.Fatal(err)
 		}
 
 		c.Send(tx, 'w')
 		c.Recv(rx, 'r')
-		defer c.Close()
+		defer c.Close(ErrActiveClose)
 	}
 
 	b.ReportAllocs()
@@ -938,8 +953,13 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 
 	count := 0
 	target := bufsize * b.N * numconn
+	sendsize := 0
 
 	//fmt.Println(5)
+
+	//t := newTimer(time.Second*10, func(_ *Timer) {
+	//	fmt.Println(sendsize, count, target, *recvsize)
+	//})
 
 	for {
 		conn, buff, bytestransfer, context, err := w.GetCompleteStatus()
@@ -947,7 +967,7 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 			if err == ErrServiceClosed {
 				break
 			} else {
-				conn.Close()
+				conn.Close(err)
 			}
 		} else {
 			if context.(rune) == 'r' {
@@ -958,10 +978,15 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 				}
 				conn.Send(buff[:bytestransfer], 'w')
 			} else {
+				sendsize += bytestransfer
 				conn.Recv(buff[:cap(buff)], 'r')
 			}
 		}
 	}
 
+	//t.Cancel()
+
 	//fmt.Println(6)
+
+	//fmt.Println("\n------end----------------")
 }
