@@ -442,6 +442,7 @@ func (this *AIOConn) Recv(buff []byte, context interface{}) error {
 	}
 }
 
+/*
 func (this *AIOConn) onActive(ev int) {
 
 	this.Lock()
@@ -461,8 +462,32 @@ func (this *AIOConn) onActive(ev int) {
 		this.service.pushIOTask(this)
 	}
 
+}*/
+
+func (this *AIOConn) onActive(ev int) {
+
+	this.Lock()
+	defer this.Unlock()
+
+	if ev&EV_READ != 0 || ev&EV_ERROR != 0 {
+		this.readable = true
+		this.readableVer++
+	}
+
+	if ev&EV_WRITE != 0 || ev&EV_ERROR != 0 {
+		this.writeable = true
+		this.writeableVer++
+		this.service.poller.disableWrite(this)
+	}
+
+	if (this.canRead() || this.canWrite()) && !this.doing {
+		this.doing = true
+		this.service.pushIOTask(this)
+	}
+
 }
 
+/*
 func (this *AIOConn) doRead() {
 	c := this.r.front()
 	size, err := syscall.Read(this.fd, c.buff)
@@ -548,6 +573,101 @@ func (this *AIOConn) Do() {
 			}
 		}
 	}
+}*/
+
+func (this *AIOConn) doRead() {
+	c := this.r.front()
+	ver := this.readableVer
+	this.Unlock()
+	size, err := syscall.Read(this.fd, c.buff)
+	this.Lock()
+	if err == syscall.EINTR {
+		return
+	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
+		this.r.popFront()
+		if size == 0 {
+			err = ErrEof
+		}
+		this.service.postCompleteStatus(this, c.buff, size, err, c.context)
+	} else if err == syscall.EAGAIN {
+		if ver == this.readableVer {
+			this.readable = false
+		}
+	} else {
+		this.r.popFront()
+		this.service.postCompleteStatus(this, c.buff, size, nil, c.context)
+	}
+}
+
+func (this *AIOConn) doWrite() {
+	c := this.w.front()
+	ver := this.writeableVer
+	this.Unlock()
+	size, err := syscall.Write(this.fd, c.buff[c.offset:])
+	this.Lock()
+	if err == syscall.EINTR {
+		return
+	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
+		this.w.popFront()
+		if size == 0 {
+			err = ErrEof
+		}
+		this.service.postCompleteStatus(this, c.buff, c.offset, err, c.context)
+	} else if err == syscall.EAGAIN {
+		if ver == this.writeableVer {
+			this.writeable = false
+			this.service.poller.enableWrite(this)
+		}
+	} else {
+		if len(c.buff[c.offset:]) == size {
+			this.w.popFront()
+			this.service.postCompleteStatus(this, c.buff, len(c.buff), nil, c.context)
+		} else {
+			c.offset += size
+			if ver == this.writeableVer {
+				this.writeable = false
+				this.service.poller.enableWrite(this)
+			}
+		}
+	}
+
+}
+
+func (this *AIOConn) Do() {
+	this.Lock()
+	defer this.Unlock()
+	for {
+		if this.closed {
+			for !this.r.empty() {
+				c := this.r.front()
+				this.service.postCompleteStatus(this, c.buff, 0, this.reason, c.context)
+				this.r.popFront()
+			}
+			for !this.w.empty() {
+				c := this.w.front()
+				this.service.postCompleteStatus(this, c.buff, c.offset, this.reason, c.context)
+				this.w.popFront()
+			}
+			this.service.unwatch(this)
+			this.rawconn.Close()
+			break
+
+		} else {
+			if this.canRead() {
+				this.doRead()
+			}
+
+			if this.canWrite() {
+				this.doWrite()
+			}
+
+			if !(this.closed || this.canRead() || this.canWrite()) {
+				break
+			}
+		}
+	}
+
+	this.doing = false
 }
 
 type AIOService struct {

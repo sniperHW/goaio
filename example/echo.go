@@ -35,7 +35,7 @@ func main() {
 					return
 				}
 				fmt.Println(err)
-				conn.Close()
+				conn.Close(err)
 			} else {
 				if context.(rune) == 'r' {
 					conn.Send(buff[:bytestransfer], 'w')
@@ -53,7 +53,7 @@ func main() {
 			return
 		}
 
-		c, _ := goaio.Bind(conn)
+		c, _ := goaio.Bind(conn, "none")
 
 		c.SetRecvTimeout(time.Second * 5)
 
