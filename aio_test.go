@@ -21,13 +21,12 @@ import (
 	"time"
 )
 
-/*
 type TestBufferPool struct {
 	pool chan []byte
 }
 
 func NewBufferPool(bufsize int) *TestBufferPool {
-	size := 10
+	size := 1
 	p := &TestBufferPool{
 		pool: make(chan []byte, size),
 	}
@@ -37,13 +36,13 @@ func NewBufferPool(bufsize int) *TestBufferPool {
 	return p
 }
 
-func (p *TestBufferPool) Get() []byte {
+func (p *TestBufferPool) Acquire() []byte {
 	return <-p.pool
 }
 
-func (p *TestBufferPool) Put(buff []byte) {
+func (p *TestBufferPool) Release(buff []byte) {
 	p.pool <- buff[:cap(buff)]
-}*/
+}
 
 func init() {
 
@@ -56,97 +55,7 @@ const (
 
 var resultCount int32
 
-/*
-func echoServerUsePool(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
-
-	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
-	if err != nil {
-		panic(err.Error())
-	}
-
-	ln, err := net.ListenTCP("tcp", tcpAddr)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	pool := NewBufferPool(bufsize)
-
-	w, err := NewWatcher(&WatcherOption{
-		WorkerCount: 1,
-		BufferPool:  pool,
-	})
-
-	if nil != err {
-		log.Println(err.Error())
-		return nil, nil
-	}
-
-	done := NewCompleteQueue()
-
-	die := make(chan struct{})
-
-	var clientCount int32
-
-	go func() {
-		for {
-			es, ok := done.Get()
-			if !ok {
-				break
-			} else {
-				for ; nil != es; es = es.Next() {
-					if es.Err != nil {
-						es.Conn.Close()
-						atomic.AddInt32(&clientCount, -1)
-					} else {
-						var err error
-						if es.Type == Read {
-							err = es.Conn.Send(es.GetBuff()[:es.Size], es.Ud, done)
-						} else {
-							pool.Put(es.GetBuff())
-							err = es.Conn.Recv(nil, nil, done)
-						}
-						if nil != err {
-							es.Conn.Close()
-							atomic.AddInt32(&clientCount, -1)
-						}
-					}
-				}
-
-				if 0 == atomic.LoadInt32(&clientCount) {
-					close(die)
-					break
-				}
-			}
-		}
-		w.Close()
-		done.Close()
-	}()
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-
-			c, err := w.Watch(conn)
-			if err != nil {
-				w.Close()
-				return
-			}
-
-			if err := c.Recv(nil, nil, done); nil != err {
-				fmt.Println("first recv", err)
-			} else {
-				atomic.AddInt32(&clientCount, 1)
-			}
-
-		}
-	}()
-	return ln, die
-}*/
-
-func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}, *int) {
+func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	if err != nil {
@@ -164,8 +73,6 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}, *int) {
 
 	var clientCount int32
 
-	recvsize := 0
-
 	go func() {
 		for {
 			conn, buff, bytestransfer, context, err := w.GetCompleteStatus()
@@ -179,7 +86,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}, *int) {
 				}
 			} else {
 				if context.(rune) == 'r' {
-					recvsize += bytestransfer
+					//fmt.Println("recv", bytestransfer)
 					conn.Send(buff[:bytestransfer], 'w')
 				} else {
 					conn.Recv(buff[:cap(buff)], 'r')
@@ -220,7 +127,61 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}, *int) {
 			}
 		}
 	}()
-	return ln, die, &recvsize
+	return ln, die
+}
+
+func TestShareBuffer(t *testing.T) {
+	ln, serverDie := echoServer(t, 4096)
+
+	defer func() {
+		ln.Close()
+		<-serverDie
+	}()
+
+	w := NewAIOService(1)
+
+	buffpool := NewBufferPool(4096)
+
+	for i := 0; i < 10; i++ {
+
+		conn, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		c, err := w.Bind(conn, AIOConnOption{ShareBuff: buffpool})
+
+		if nil != err {
+			t.Fatal(err)
+		}
+
+		wx := make([]byte, 4096)
+
+		c.Send(wx, 'w')
+
+		defer c.Close(ErrActiveClose)
+	}
+
+	count := 0
+
+	for {
+		conn, buff, _, context, err := w.GetCompleteStatus()
+		if nil == err {
+			if context.(rune) == 'w' {
+				//使用ShareBuff,不需要提供buff
+				conn.Recv(nil, 'r')
+			} else {
+				//使用关闭归还buffpool供其它连接使用
+				buffpool.Release(buff)
+				count++
+				if count == 10 {
+					break
+				}
+			}
+		}
+	}
+
+	w.Close()
 }
 
 func TestRecvTimeout1(t *testing.T) {
@@ -520,7 +481,7 @@ func TestSendTimeout2(t *testing.T) {
 }
 
 func TestEchoTiny(t *testing.T) {
-	ln, serverDie, _ := echoServer(t, 4096)
+	ln, serverDie := echoServer(t, 4096)
 
 	defer func() {
 		ln.Close()
@@ -550,7 +511,7 @@ func TestEchoTiny(t *testing.T) {
 }
 
 func TestEchoHuge(t *testing.T) {
-	ln, serverDie, _ := echoServer(t, 4096)
+	ln, serverDie := echoServer(t, 4096)
 
 	defer func() {
 		ln.Close()
@@ -631,7 +592,7 @@ func Test2kTiny(t *testing.T) {
 
 func testParallel(t *testing.T, par int, msgsize int) {
 	t.Log("testing concurrent:", par, "connections")
-	ln, serverDie, _ := echoServer(t, msgsize)
+	ln, serverDie := echoServer(t, msgsize)
 	defer func() {
 		t.Log("wait server finish")
 		ln.Close()
@@ -711,116 +672,6 @@ func testParallel(t *testing.T, par int, msgsize int) {
 	<-ok
 }
 
-/*
-func Test100Pool(t *testing.T) {
-	testParallelUsePool(t, 100, 1024)
-}
-*/
-/*
-func Test1kPool(t *testing.T) {
-	testParallelUsePool(t, 1024, 1024)
-}
-func Test2kPool(t *testing.T) {
-	testParallelUsePool(t, 2048, 1024)
-}
-*/
-
-/*
-func testParallelUsePool(t *testing.T, par int, msgsize int) {
-	t.Log("testing concurrent:", par, "connections")
-	ln, serverDie := echoServerUsePool(t, msgsize)
-	defer func() {
-		t.Log("wait server finish")
-		ln.Close()
-		<-serverDie
-	}()
-
-	w, err := NewWatcher(&WatcherOption{
-		WorkerCount: 1,
-	})
-
-	if nil != err {
-		log.Println(err.Error())
-		return
-	}
-
-	done := NewCompleteQueue()
-	die := make(chan struct{})
-
-	ok := make(chan struct{})
-
-	go func() {
-
-		conns := []*Conn{}
-
-		for i := 0; i < par; i++ {
-			data := make([]byte, msgsize)
-			conn, err := net.Dial("tcp", ln.Addr().String())
-
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			c, err := w.Watch(conn)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			conns = append(conns, c)
-
-			// send
-			err = c.Send(data, nil, done)
-			if err != nil {
-				panic(err)
-				log.Fatal(err)
-			}
-		}
-		<-die
-
-		for _, v := range conns {
-			v.Close()
-		}
-
-		close(ok)
-
-	}()
-
-	nbytes := 0
-	ntotal := msgsize * par
-
-	go func() {
-
-		for {
-			es, ok := done.Get()
-			if !ok {
-				return
-			} else {
-				for ; nil != es; es = es.Next() {
-					if es.Err == nil {
-						if es.Type == Read {
-							nbytes += es.Size
-							if nbytes >= ntotal {
-								t.Log("completed:", nbytes)
-								close(die)
-								break
-							}
-						} else {
-							buff := es.GetBuff()
-							err := es.Conn.Recv(buff[:cap(buff)], nil, done)
-							if err != nil {
-								panic(err)
-								log.Fatal(err)
-							}
-						}
-					}
-				}
-			}
-		}
-	}()
-
-	<-ok
-}*/
-
 func BenchmarkEcho128B(b *testing.B) {
 	benchmarkEcho(b, 128, 1)
 }
@@ -867,22 +718,16 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 
 	b.Log("benchmark echo with message size:", bufsize, "with", numconn, "parallel connections, for", b.N, "times")
 
-	//fmt.Println("\n------begin----------------")
-
-	ln, serverDie, _ := echoServer(b, bufsize)
+	ln, serverDie := echoServer(b, bufsize)
 	defer func() {
 		ln.Close()
-		//fmt.Println(1)
 		<-serverDie
-		//fmt.Println(2)
 	}()
 
 	w := NewAIOService(1)
 
 	defer func() {
-		//fmt.Println(3)
 		w.Close()
-		//fmt.Println(4)
 	}()
 
 	addr, _ := net.ResolveTCPAddr("tcp", ln.Addr().String())
@@ -913,12 +758,6 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 	target := bufsize * b.N * numconn
 	sendsize := 0
 
-	//fmt.Println(5)
-
-	//t := newTimer(time.Second*10, func(_ *Timer) {
-	//	fmt.Println(sendsize, count, target, *recvsize)
-	//})
-
 	for {
 		conn, buff, bytestransfer, context, err := w.GetCompleteStatus()
 		if nil != err {
@@ -930,7 +769,6 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 		} else {
 			if context.(rune) == 'r' {
 				count += bytestransfer
-				//fmt.Println(bytestransfer, count, target)
 				if count >= target {
 					break
 				}
@@ -941,10 +779,4 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 			}
 		}
 	}
-
-	//t.Cancel()
-
-	//fmt.Println(6)
-
-	//fmt.Println("\n------end----------------")
 }

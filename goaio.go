@@ -40,9 +40,10 @@ type ShareBuffer interface {
 }
 
 type AIOConnOption struct {
-	sendqueSize int
-	recvqueSize int
-	sharebuff   ShareBuffer
+	SendqueSize int
+	RecvqueSize int
+	ShareBuff   ShareBuffer
+	UserData    interface{}
 }
 
 const max_send_size = 1024 * 256
@@ -70,6 +71,7 @@ type AIOConn struct {
 	reason        error
 	sharebuff     ShareBuffer
 	send_iovec    []syscall.Iovec
+	UserData      interface{}
 }
 
 type aioContext struct {
@@ -280,6 +282,10 @@ func (this *completetionQueue) getCompleteStatus() (c *AIOConn, buff []byte, byt
 	this.mu.Unlock()
 
 	return
+}
+
+func (this *AIOConn) GetUserData() interface{} {
+	return this.UserData
 }
 
 func (this *AIOConn) Close(reason error) {
@@ -701,12 +707,12 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 
 	syscall.SetNonblock(fd, true)
 
-	if option.recvqueSize <= 0 {
-		option.recvqueSize = 32
+	if option.RecvqueSize <= 0 {
+		option.RecvqueSize = 32
 	}
 
-	if option.sendqueSize <= 0 {
-		option.sendqueSize = 32
+	if option.SendqueSize <= 0 {
+		option.SendqueSize = 32
 	}
 
 	cc := &AIOConn{
@@ -715,13 +721,14 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 		writeable: true,
 		rawconn:   conn,
 		service:   this,
-		sharebuff: option.sharebuff,
-		r:         newAioContextQueue(option.recvqueSize),
-		w:         newAioContextQueue(option.sendqueSize),
+		sharebuff: option.ShareBuff,
+		r:         newAioContextQueue(option.RecvqueSize),
+		w:         newAioContextQueue(option.SendqueSize),
+		UserData:  UserData,
 	}
 
-	if option.sendqueSize < max_send_iovec_size {
-		cc.send_iovec = make([]syscall.Iovec, option.sendqueSize)
+	if option.SendqueSize < max_send_iovec_size {
+		cc.send_iovec = make([]syscall.Iovec, option.SendqueSize)
 	} else {
 		cc.send_iovec = make([]syscall.Iovec, max_send_iovec_size)
 	}
