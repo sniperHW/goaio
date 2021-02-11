@@ -74,6 +74,7 @@ type AIOConn struct {
 	sharebuff     ShareBuffer
 	send_iovec    []syscall.Iovec
 	UserData      interface{}
+	doTimeout     bool
 }
 
 type aioContext struct {
@@ -314,44 +315,51 @@ func (this *AIOConn) Close(reason error) {
 	})
 }
 
+func (this *AIOConn) processTimeout() {
+	now := time.Now()
+	for !this.r.empty() {
+		f := this.r.front()
+		if now.After(f.deadline) {
+			this.r.popFront()
+			this.service.postCompleteStatus(this, f.buff, 0, ErrRecvTimeout, f.context)
+		} else {
+			break
+		}
+	}
+
+	for !this.w.empty() {
+		f := this.w.front()
+		if now.After(f.deadline) {
+			this.w.popFront()
+			this.service.postCompleteStatus(this, f.buff, f.offset, ErrSendTimeout, f.context)
+		} else {
+			break
+		}
+	}
+
+	var deadline time.Time
+	if !this.r.empty() && this.r.front().deadline.After(deadline) {
+		deadline = this.r.front().deadline
+	}
+
+	if !this.w.empty() && this.w.front().deadline.After(deadline) {
+		deadline = this.w.front().deadline
+	}
+
+	if !deadline.IsZero() {
+		this.timer = newTimer(now.Sub(deadline), this.onTimeout)
+	}
+}
+
 func (this *AIOConn) onTimeout(t *Timer) {
 	this.Lock()
 	defer this.Unlock()
-	now := time.Now()
 	if this.timer == t {
-		for !this.r.empty() {
-			f := this.r.front()
-			if now.After(f.deadline) {
-				this.r.popFront()
-				this.service.postCompleteStatus(this, f.buff, 0, ErrRecvTimeout, f.context)
-			} else {
-				break
-			}
+		this.doTimeout = true
+		if !this.doing {
+			this.doing = true
+			this.service.pushIOTask(this)
 		}
-
-		for !this.w.empty() {
-			f := this.w.front()
-			if now.After(f.deadline) {
-				this.w.popFront()
-				this.service.postCompleteStatus(this, f.buff, f.offset, ErrSendTimeout, f.context)
-			} else {
-				break
-			}
-		}
-
-		var deadline time.Time
-		if !this.r.empty() && this.r.front().deadline.After(deadline) {
-			deadline = this.r.front().deadline
-		}
-
-		if !this.w.empty() && this.w.front().deadline.After(deadline) {
-			deadline = this.w.front().deadline
-		}
-
-		if !deadline.IsZero() {
-			this.timer = newTimer(now.Sub(deadline), this.onTimeout)
-		}
-
 	}
 }
 
@@ -566,9 +574,6 @@ func (this *AIOConn) doWrite() {
 	//writev无效果，cc>1实际效果跟cc==1一样
 	nwRaw, _, errno := syscall.Syscall(syscall.SYS_WRITEV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.send_iovec[0])), uintptr(cc))
 	size := int(nwRaw)
-	/*if cc > 1 {
-		fmt.Println(cc, total, size)
-	}*/
 	this.Lock()
 	if errno == syscall.EINTR {
 		return
@@ -628,6 +633,12 @@ func (this *AIOConn) Do() {
 			this.rawconn.Close()
 			return
 		} else {
+
+			if this.doTimeout {
+				this.doTimeout = false
+				this.processTimeout()
+			}
+
 			if this.canRead() {
 				this.doRead()
 			}
