@@ -317,32 +317,36 @@ func (this *AIOConn) Close(reason error) {
 
 func (this *AIOConn) processTimeout() {
 	now := time.Now()
-	for !this.r.empty() {
-		f := this.r.front()
-		if now.After(f.deadline) {
-			this.r.popFront()
-			this.service.postCompleteStatus(this, f.buff, 0, ErrRecvTimeout, f.context)
-		} else {
-			break
+	if this.recvTimeout > 0 {
+		for !this.r.empty() {
+			f := this.r.front()
+			if now.After(f.deadline) {
+				this.r.popFront()
+				this.service.postCompleteStatus(this, f.buff, 0, ErrRecvTimeout, f.context)
+			} else {
+				break
+			}
 		}
 	}
 
-	for !this.w.empty() {
-		f := this.w.front()
-		if now.After(f.deadline) {
-			this.w.popFront()
-			this.service.postCompleteStatus(this, f.buff, f.offset, ErrSendTimeout, f.context)
-		} else {
-			break
+	if this.sendTimeout > 0 {
+		for !this.w.empty() {
+			f := this.w.front()
+			if now.After(f.deadline) {
+				this.w.popFront()
+				this.service.postCompleteStatus(this, f.buff, f.offset, ErrSendTimeout, f.context)
+			} else {
+				break
+			}
 		}
 	}
 
 	var deadline time.Time
-	if !this.r.empty() && this.r.front().deadline.After(deadline) {
+	if this.recvTimeout > 0 && !this.r.empty() && this.r.front().deadline.After(deadline) {
 		deadline = this.r.front().deadline
 	}
 
-	if !this.w.empty() && this.w.front().deadline.After(deadline) {
+	if this.sendTimeout > 0 && !this.w.empty() && this.w.front().deadline.After(deadline) {
 		deadline = this.w.front().deadline
 	}
 
