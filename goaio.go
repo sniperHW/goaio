@@ -379,11 +379,11 @@ func (this *AIOConn) SetSendTimeout(timeout time.Duration) {
 	this.sendTimeout = timeout
 	if timeout != 0 {
 		deadline := time.Now().Add(timeout)
-		if this.r.setDeadline(deadline) {
+		if this.w.setDeadline(deadline) {
 			this.timer = newTimer(timeout, this.onTimeout)
 		}
 	} else {
-		this.r.setDeadline(time.Time{})
+		this.w.setDeadline(time.Time{})
 		if nil != this.timer {
 			this.timer.Cancel()
 			this.timer = nil
@@ -563,8 +563,12 @@ func (this *AIOConn) doWrite() {
 	ver := this.writeableVer
 	cc, total := this.w.packIovec(&this.send_iovec)
 	this.Unlock()
+	//writev无效果，cc>1实际效果跟cc==1一样
 	nwRaw, _, errno := syscall.Syscall(syscall.SYS_WRITEV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.send_iovec[0])), uintptr(cc))
 	size := int(nwRaw)
+	/*if cc > 1 {
+		fmt.Println(cc, total, size)
+	}*/
 	this.Lock()
 	if errno == syscall.EINTR {
 		return
