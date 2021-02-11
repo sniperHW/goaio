@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -22,6 +23,7 @@ var (
 	ErrWatchFailed   = errors.New("watch failed")
 	ErrActiveClose   = errors.New("active close")
 	ErrCloseNone     = errors.New("close no reason")
+	ErrCloseGC       = errors.New("close by gc")
 )
 
 const (
@@ -290,6 +292,7 @@ func (this *AIOConn) GetUserData() interface{} {
 
 func (this *AIOConn) Close(reason error) {
 	this.closeOnce.Do(func() {
+		runtime.SetFinalizer(this, nil)
 		this.Lock()
 		defer this.Unlock()
 		this.closed = true
@@ -304,7 +307,9 @@ func (this *AIOConn) Close(reason error) {
 		}
 		if !this.doing {
 			this.doing = true
-			this.service.pushIOTask(this)
+			if nil != this.service.pushIOTask(this) {
+				this.rawconn.Close()
+			}
 		}
 	})
 }
@@ -403,6 +408,10 @@ func (this *AIOConn) canWrite() bool {
 }
 
 func (this *AIOConn) Send(buff []byte, context interface{}) error {
+	if atomic.LoadInt32(&this.service.closed) == 1 {
+		return ErrServiceClosed
+	}
+
 	this.Lock()
 	defer this.Unlock()
 
@@ -429,6 +438,8 @@ func (this *AIOConn) Send(buff []byte, context interface{}) error {
 			return err
 		}
 
+		this.service.addIO(this)
+
 		if this.writeable && !this.doing {
 			this.doing = true
 			this.service.pushIOTask(this)
@@ -439,6 +450,10 @@ func (this *AIOConn) Send(buff []byte, context interface{}) error {
 }
 
 func (this *AIOConn) Recv(buff []byte, context interface{}) error {
+	if atomic.LoadInt32(&this.service.closed) == 1 {
+		return ErrServiceClosed
+	}
+
 	this.Lock()
 	defer this.Unlock()
 
@@ -464,6 +479,8 @@ func (this *AIOConn) Recv(buff []byte, context interface{}) error {
 		}); nil != err {
 			return err
 		}
+
+		this.service.addIO(this)
 
 		if this.readable && !this.doing {
 			this.doing = true
@@ -603,9 +620,9 @@ func (this *AIOConn) Do() {
 				this.w.popFront()
 			}
 			this.service.unwatch(this)
+			//fmt.Println("do close", this.fd)
 			this.rawconn.Close()
-			break
-
+			return
 		} else {
 			if this.canRead() {
 				this.doRead()
@@ -625,14 +642,51 @@ func (this *AIOConn) Do() {
 }
 
 type AIOService struct {
-	sync.Mutex
 	completeQueue *completetionQueue
 	tq            *taskQueue
 	poller        pollerI
 	closed        int32
-	conns         map[int]*AIOConn
 	waitgroup     sync.WaitGroup
 	closeOnce     sync.Once
+	connMgr       []connMgr
+}
+
+type connMgr struct {
+	sync.Mutex
+	conns  map[*AIOConn]int
+	closed bool
+}
+
+func (this *connMgr) addIO(c *AIOConn) {
+	this.Lock()
+	defer this.Unlock()
+	if !this.closed {
+		this.conns[c] = this.conns[c] + 1
+	}
+}
+
+func (this *connMgr) subIO(c *AIOConn) {
+	this.Lock()
+	defer this.Unlock()
+	count := this.conns[c] - 1
+	if count == 0 {
+		delete(this.conns, c)
+	} else {
+		this.conns[c] = count
+	}
+}
+
+func (this *connMgr) close() {
+	this.Lock()
+	conns := []*AIOConn{}
+	for v, _ := range this.conns {
+		conns = append(conns, v)
+	}
+	this.Unlock()
+
+	for _, v := range conns {
+		v.Close(ErrServiceClosed)
+	}
 }
 
 func NewAIOService(worker int) *AIOService {
@@ -641,7 +695,14 @@ func NewAIOService(worker int) *AIOService {
 		s.completeQueue = newCompletetionQueue()
 		s.tq = NewTaskQueue()
 		s.poller = poller
-		s.conns = map[int]*AIOConn{}
+		s.connMgr = make([]connMgr, 127)
+
+		for k, _ := range s.connMgr {
+			s.connMgr[k] = connMgr{
+				conns: map[*AIOConn]int{},
+			}
+		}
+
 		if worker <= 0 {
 			worker = 1
 		}
@@ -670,17 +731,20 @@ func NewAIOService(worker int) *AIOService {
 }
 
 func (this *AIOService) unwatch(c *AIOConn) {
-	this.Lock()
-	defer this.Unlock()
-	delete(this.conns, c.fd)
 	this.poller.unwatch(c)
 }
 
-func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
-	this.Lock()
-	defer this.Unlock()
+func (this *AIOService) addIO(c *AIOConn) {
+	this.connMgr[c.fd%len(this.connMgr)].addIO(c)
+}
 
-	if 1 == this.closed {
+func (this *AIOService) subIO(c *AIOConn) {
+	this.connMgr[c.fd%len(this.connMgr)].subIO(c)
+}
+
+func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
+
+	if 1 == atomic.LoadInt32(&this.closed) {
 		return nil, ErrServiceClosed
 	}
 
@@ -724,7 +788,7 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 		sharebuff: option.ShareBuff,
 		r:         newAioContextQueue(option.RecvqueSize),
 		w:         newAioContextQueue(option.SendqueSize),
-		UserData:  UserData,
+		UserData:  option.UserData,
 	}
 
 	if option.SendqueSize < max_send_iovec_size {
@@ -734,18 +798,21 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 	}
 
 	if this.poller.watch(cc) {
-		this.conns[fd] = cc
+		runtime.SetFinalizer(cc, func(cc *AIOConn) {
+			cc.Close(ErrCloseGC)
+		})
 		return cc, nil
 	} else {
 		return nil, ErrWatchFailed
 	}
 }
 
-func (this *AIOService) pushIOTask(c *AIOConn) {
-	this.tq.push(c)
+func (this *AIOService) pushIOTask(c *AIOConn) error {
+	return this.tq.push(c)
 }
 
 func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfer int, err error, context interface{}) {
+	this.subIO(c)
 	this.completeQueue.postCompleteStatus(c, buff, bytestransfer, err, context)
 }
 
@@ -755,18 +822,10 @@ func (this *AIOService) GetCompleteStatus() (*AIOConn, []byte, int, interface{},
 
 func (this *AIOService) Close() {
 	this.closeOnce.Do(func() {
-		this.Lock()
 		atomic.StoreInt32(&this.closed, 1)
 		this.poller.trigger()
-		/*   关闭所有AIOConn
-		 *   最终在AIOConn.Do中向所有待处理的AIO返回ErrConnClosed
-		 */
-		conns := this.conns
-		this.conns = nil
-		this.Unlock()
-
-		for _, v := range conns {
-			(*AIOConn)(unsafe.Pointer(v)).Close(ErrServiceClosed)
+		for _, v := range this.connMgr {
+			v.close()
 		}
 
 		this.tq.close()

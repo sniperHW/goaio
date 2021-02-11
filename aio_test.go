@@ -15,7 +15,7 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
-	//"runtime"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,6 +130,39 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 	return ln, die
 }
 
+func TestGC(t *testing.T) {
+	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	ln, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn.(*net.TCPConn).SetWriteBuffer(4096)
+
+	w := NewAIOService(1)
+
+	defer w.Close()
+
+	_, err = w.Bind(conn, AIOConnOption{})
+
+	if nil != err {
+		t.Fatal(err)
+	}
+
+	runtime.GC()
+
+	ln.Close()
+}
+
 func TestShareBuffer(t *testing.T) {
 	ln, serverDie := echoServer(t, 4096)
 
@@ -139,6 +172,8 @@ func TestShareBuffer(t *testing.T) {
 	}()
 
 	w := NewAIOService(1)
+
+	defer w.Close()
 
 	buffpool := NewBufferPool(4096)
 
@@ -180,8 +215,6 @@ func TestShareBuffer(t *testing.T) {
 			}
 		}
 	}
-
-	w.Close()
 }
 
 func TestRecvTimeout1(t *testing.T) {
@@ -475,8 +508,8 @@ func TestSendTimeout2(t *testing.T) {
 		v.Close()
 	}
 
-	assert.Equal(t, ErrConnClosed, c.Send(wx, nil))
-	assert.Equal(t, ErrConnClosed, c.Recv(wx, nil))
+	assert.Equal(t, ErrServiceClosed, c.Send(wx, nil))
+	assert.Equal(t, ErrServiceClosed, c.Recv(wx, nil))
 
 }
 
@@ -711,7 +744,7 @@ func BenchmarkEcho64KParallel(b *testing.B) {
 
 */
 func BenchmarkEcho128KParallel(b *testing.B) {
-	benchmarkEcho(b, 128*1024, 128)
+	benchmarkEcho(b, 128*1024, 32)
 }
 
 func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
@@ -726,9 +759,7 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 
 	w := NewAIOService(1)
 
-	defer func() {
-		w.Close()
-	}()
+	defer w.Close()
 
 	addr, _ := net.ResolveTCPAddr("tcp", ln.Addr().String())
 	for i := 0; i < numconn; i++ {
