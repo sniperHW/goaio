@@ -48,9 +48,6 @@ type AIOConnOption struct {
 	UserData    interface{}
 }
 
-//const max_send_size = 1024 * 256
-//const max_send_iovec_size = 512
-
 type AIOConn struct {
 	sync.Mutex
 	nnext         *AIOConn
@@ -72,9 +69,8 @@ type AIOConn struct {
 	timer         *Timer
 	reason        error
 	sharebuff     ShareBuffer
-	//send_iovec    []syscall.Iovec
-	UserData  interface{}
-	doTimeout bool
+	UserData      interface{}
+	doTimeout     bool
 }
 
 type aioContext struct {
@@ -91,6 +87,9 @@ type aioContextQueue struct {
 }
 
 func newAioContextQueue(max int) *aioContextQueue {
+	if max <= 0 {
+		max = 32
+	}
 	return &aioContextQueue{
 		queue: make([]aioContext, max+1, max+1),
 	}
@@ -122,29 +121,6 @@ func (this *aioContextQueue) popFront() {
 		this.head = (this.head + 1) % len(this.queue)
 	}
 }
-
-/*
-func (this *aioContextQueue) packIovec(iovec *[]syscall.Iovec) (int, int) {
-	if this.empty() {
-		return 0, 0
-	} else {
-		cc := 0
-		total := 0
-		o := 0
-		for i := this.head; ; {
-			b := &this.queue[this.head]
-			size := len(b.buff) - b.offset
-			(*iovec)[o] = syscall.Iovec{&b.buff[b.offset], uint64(size)}
-			total += size
-			cc++
-			i = (i + 1) % len(this.queue)
-			if i == this.tail || total >= max_send_size || cc >= len(*iovec) || cc >= max_send_iovec_size {
-				break
-			}
-		}
-		return cc, total
-	}
-}*/
 
 func (this *aioContextQueue) setDeadline(deadline time.Time) bool {
 	if this.empty() {
@@ -605,53 +581,6 @@ func (this *AIOConn) doWrite() {
 	}
 }
 
-/*
-//writev无效果，cc>1实际效果跟cc==1一样
-func (this *AIOConn) doWrite() {
-	ver := this.writeableVer
-	cc, total := this.w.packIovec(&this.send_iovec)
-	this.Unlock()
-	nwRaw, _, errno := syscall.Syscall(syscall.SYS_WRITEV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.send_iovec[0])), uintptr(cc))
-	size := int(nwRaw)
-	this.Lock()
-	if errno == syscall.EINTR {
-		return
-	} else if errno != 0 && errno != syscall.EAGAIN {
-		err := fmt.Errorf("send error errno:%d", errno)
-		for !this.w.empty() {
-			c := this.w.front()
-			this.service.postCompleteStatus(this, c.buff, c.offset, err, c.context)
-			this.w.popFront()
-		}
-	} else if errno == syscall.EAGAIN {
-		if ver == this.writeableVer {
-			this.writeable = false
-			this.service.poller.enableWrite(this)
-		}
-	} else {
-		remain := size
-		for remain > 0 {
-			c := this.w.front()
-			if remain >= len(c.buff[c.offset:]) {
-				this.service.postCompleteStatus(this, c.buff, len(c.buff), nil, c.context)
-				this.w.popFront()
-				remain -= len(c.buff[c.offset:])
-			} else {
-				c.offset += remain
-				remain = 0
-			}
-		}
-
-		if size < total {
-			if ver == this.writeableVer {
-				this.writeable = false
-				this.service.poller.enableWrite(this)
-			}
-		}
-	}
-}
-*/
-
 func (this *AIOConn) Do() {
 	this.Lock()
 	defer this.Unlock()
@@ -668,7 +597,6 @@ func (this *AIOConn) Do() {
 				this.w.popFront()
 			}
 			this.service.unwatch(this)
-			//fmt.Println("do close", this.fd)
 			this.rawconn.Close()
 			return
 		} else {
@@ -696,6 +624,7 @@ func (this *AIOConn) Do() {
 }
 
 type AIOService struct {
+	sync.Mutex
 	completeQueue *completetionQueue
 	tq            *taskQueue
 	poller        pollerI
@@ -798,7 +727,10 @@ func (this *AIOService) subIO(c *AIOConn) {
 
 func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
 
-	if 1 == atomic.LoadInt32(&this.closed) {
+	this.Lock()
+	defer this.Unlock()
+
+	if 1 == this.closed {
 		return nil, ErrServiceClosed
 	}
 
@@ -825,14 +757,6 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 
 	syscall.SetNonblock(fd, true)
 
-	if option.RecvqueSize <= 0 {
-		option.RecvqueSize = 32
-	}
-
-	if option.SendqueSize <= 0 {
-		option.SendqueSize = 32
-	}
-
 	cc := &AIOConn{
 		fd:        fd,
 		readable:  true,
@@ -844,12 +768,6 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 		w:         newAioContextQueue(option.SendqueSize),
 		UserData:  option.UserData,
 	}
-
-	/*if option.SendqueSize < max_send_iovec_size {
-		cc.send_iovec = make([]syscall.Iovec, option.SendqueSize)
-	} else {
-		cc.send_iovec = make([]syscall.Iovec, max_send_iovec_size)
-	}*/
 
 	if this.poller.watch(cc) {
 		runtime.SetFinalizer(cc, func(cc *AIOConn) {
@@ -876,6 +794,8 @@ func (this *AIOService) GetCompleteStatus() (*AIOConn, []byte, int, interface{},
 
 func (this *AIOService) Close() {
 	this.closeOnce.Do(func() {
+		this.Lock()
+		defer this.Unlock()
 		atomic.StoreInt32(&this.closed, 1)
 		this.poller.trigger()
 		for _, v := range this.connMgr {
