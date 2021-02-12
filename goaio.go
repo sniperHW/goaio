@@ -2,14 +2,12 @@ package goaio
 
 import (
 	"errors"
-	//"fmt"
 	"net"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
-	//"unsafe"
 )
 
 var (
@@ -70,7 +68,7 @@ type AIOConn struct {
 	reason        error
 	sharebuff     ShareBuffer
 	UserData      interface{}
-	doTimeout     bool
+	doTimeout     *Timer
 }
 
 type aioContext struct {
@@ -336,7 +334,7 @@ func (this *AIOConn) onTimeout(t *Timer) {
 	this.Lock()
 	defer this.Unlock()
 	if this.timer == t {
-		this.doTimeout = true
+		this.doTimeout = this.timer
 		if !this.doing {
 			this.doing = true
 			this.service.pushIOTask(this)
@@ -347,6 +345,10 @@ func (this *AIOConn) onTimeout(t *Timer) {
 func (this *AIOConn) SetRecvTimeout(timeout time.Duration) {
 	this.Lock()
 	defer this.Unlock()
+	if nil != this.timer {
+		this.timer.Cancel()
+		this.timer = nil
+	}
 	this.recvTimeout = timeout
 	if timeout != 0 {
 		deadline := time.Now().Add(timeout)
@@ -355,10 +357,6 @@ func (this *AIOConn) SetRecvTimeout(timeout time.Duration) {
 		}
 	} else {
 		this.r.setDeadline(time.Time{})
-		if nil != this.timer {
-			this.timer.Cancel()
-			this.timer = nil
-		}
 	}
 }
 
@@ -601,8 +599,8 @@ func (this *AIOConn) Do() {
 			return
 		} else {
 
-			if this.doTimeout {
-				this.doTimeout = false
+			if nil != this.timer && this.timer == this.doTimeout {
+				this.doTimeout = nil
 				this.processTimeout()
 			}
 
@@ -759,7 +757,7 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 
 	cc := &AIOConn{
 		fd:        fd,
-		readable:  true,
+		readable:  false,
 		writeable: true,
 		rawconn:   conn,
 		service:   this,
