@@ -624,7 +624,7 @@ func (this *AIOConn) Do() {
 type AIOService struct {
 	sync.Mutex
 	completeQueue *completetionQueue
-	tq            *taskQueue
+	tq            []*taskQueue
 	poller        pollerI
 	closed        int32
 	waitgroup     sync.WaitGroup
@@ -674,7 +674,7 @@ func NewAIOService(worker int) *AIOService {
 	if poller, err := openPoller(); nil == err {
 		s := &AIOService{}
 		s.completeQueue = newCompletetionQueue()
-		s.tq = NewTaskQueue()
+		//s.tq = NewTaskQueue()
 		s.poller = poller
 		s.connMgr = make([]connMgr, 127)
 
@@ -689,10 +689,12 @@ func NewAIOService(worker int) *AIOService {
 		}
 
 		for i := 0; i < worker; i++ {
+			tq := NewTaskQueue()
+			s.tq = append(s.tq, tq)
 			go func() {
 				s.waitgroup.Add(1)
 				for {
-					v, err := s.tq.pop()
+					v, err := tq.pop()
 					if nil != err {
 						break
 					} else {
@@ -778,7 +780,7 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 }
 
 func (this *AIOService) pushIOTask(c *AIOConn) error {
-	return this.tq.push(c)
+	return this.tq[c.fd%len(this.tq)].push(c)
 }
 
 func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfer int, err error, context interface{}) {
@@ -800,7 +802,9 @@ func (this *AIOService) Close() {
 			v.close()
 		}
 
-		this.tq.close()
+		for _, v := range this.tq {
+			v.close()
+		}
 
 		//等待worker处理完所有的AIOConn清理
 		this.waitgroup.Wait()
