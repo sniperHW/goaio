@@ -69,6 +69,7 @@ type AIOConn struct {
 	sharebuff     ShareBuffer
 	UserData      interface{}
 	doTimeout     *Timer
+	tqIdx         int
 }
 
 type aioContext struct {
@@ -767,6 +768,8 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 		r:         newAioContextQueue(option.RecvqueSize),
 		w:         newAioContextQueue(option.SendqueSize),
 		UserData:  option.UserData,
+		//todo:根据各tq的负载情况动态调整tqIdx以平衡worker线程的工作负载
+		tqIdx: fd % len(this.tq),
 	}
 
 	if this.poller.watch(cc) {
@@ -780,7 +783,7 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 }
 
 func (this *AIOService) pushIOTask(c *AIOConn) error {
-	return this.tq[c.fd%len(this.tq)].push(c)
+	return this.tq[c.tqIdx].push(c)
 }
 
 func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfer int, err error, context interface{}) {
