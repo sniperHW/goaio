@@ -630,7 +630,7 @@ type AIOService struct {
 	closed        int32
 	waitgroup     sync.WaitGroup
 	closeOnce     sync.Once
-	connMgr       []connMgr
+	connMgr       []*connMgr
 }
 
 type connMgr struct {
@@ -677,10 +677,9 @@ func NewAIOService(worker int) *AIOService {
 		s.completeQueue = newCompletetionQueue()
 		//s.tq = NewTaskQueue()
 		s.poller = poller
-		s.connMgr = make([]connMgr, 127)
-
+		s.connMgr = make([]*connMgr, 127)
 		for k, _ := range s.connMgr {
-			s.connMgr[k] = connMgr{
+			s.connMgr[k] = &connMgr{
 				conns: map[*AIOConn]int{},
 			}
 		}

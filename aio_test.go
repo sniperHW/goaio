@@ -279,7 +279,6 @@ func TestClose(t *testing.T) {
 	c.Close(ErrActiveClose)
 }
 
-
 func TestSendBigBuff(t *testing.T) {
 	ln, serverDie := echoServer(t, 128)
 
@@ -291,8 +290,6 @@ func TestSendBigBuff(t *testing.T) {
 	w := NewAIOService(1)
 
 	defer w.Close()
-
-
 
 	conn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
@@ -309,7 +306,7 @@ func TestSendBigBuff(t *testing.T) {
 
 	c.Send(wx, 'w')
 
-	rx := make([]byte,4096)
+	rx := make([]byte, 4096)
 
 	c.Recv(rx, 'r')
 
@@ -319,14 +316,13 @@ func TestSendBigBuff(t *testing.T) {
 		conn, _, _, context, err := w.GetCompleteStatus()
 		if nil == err {
 			if context.(rune) == 'w' {
-				break				
+				break
 			} else {
 				conn.Recv(rx, 'r')
 			}
 		}
 	}
 }
-
 
 func TestShareBuffer(t *testing.T) {
 	ln, serverDie := echoServer(t, 4096)
@@ -411,16 +407,15 @@ func TestRecvBusy(t *testing.T) {
 
 	w := NewAIOService(1)
 
-	c, err := w.Bind(conn, AIOConnOption{RecvqueSize:1})
+	c, err := w.Bind(conn, AIOConnOption{RecvqueSize: 1})
 
 	if nil != err {
 		t.Fatal(err)
 	}
 
-
 	c.Recv(make([]byte, 4096), 'r')
 
-	assert.Equal(t,ErrBusy, c.Recv(make([]byte, 4096), 'r'))
+	assert.Equal(t, ErrBusy, c.Recv(make([]byte, 4096), 'r'))
 
 	c.Close(ErrActiveClose)
 
@@ -430,7 +425,6 @@ func TestRecvBusy(t *testing.T) {
 		v.Close()
 	}
 }
-
 
 func TestSendBusy(t *testing.T) {
 
@@ -465,7 +459,7 @@ func TestSendBusy(t *testing.T) {
 
 	w := NewAIOService(0)
 
-	c, err := w.Bind(conn, AIOConnOption{SendqueSize:1})
+	c, err := w.Bind(conn, AIOConnOption{SendqueSize: 1})
 
 	if nil != err {
 		t.Fatal(err)
@@ -475,10 +469,9 @@ func TestSendBusy(t *testing.T) {
 
 		wx := make([]byte, 4096)
 
-
 		err := c.Send(wx, 'w')
 		if nil != err {
-			assert.Equal(t,ErrBusy,err)
+			assert.Equal(t, ErrBusy, err)
 			break
 		}
 	}
@@ -860,7 +853,6 @@ func TestSendTimeout2(t *testing.T) {
 
 }
 
-
 func TestSendTimeout3(t *testing.T) {
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
@@ -909,10 +901,10 @@ func TestSendTimeout3(t *testing.T) {
 	for {
 		conn, _, bytestransfer, _, err := w.GetCompleteStatus()
 		if nil != err {
-			assert.Equal(t,ErrSendTimeout,err)
+			assert.Equal(t, ErrSendTimeout, err)
 			//超时，部分发送
-			assert.NotEqual(t,0,bytestransfer)
-			assert.NotEqual(t,1024*1024,bytestransfer)
+			assert.NotEqual(t, 0, bytestransfer)
+			assert.NotEqual(t, 1024*1024, bytestransfer)
 			conn.Close(err)
 			break
 		}
@@ -1156,7 +1148,7 @@ func BenchmarkEcho64KParallel(b *testing.B) {
 
 */
 func BenchmarkEcho128KParallel(b *testing.B) {
-	benchmarkEcho(b, 128*1024, 32)
+	benchmarkEcho(b, 128*1024, 64)
 }
 
 func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
