@@ -75,21 +75,17 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 
 	go func() {
 		for {
-			conn, buff, bytestransfer, context, err := w.GetCompleteStatus()
+			res, err := w.GetCompleteStatus()
 			if nil != err {
-				if err == ErrServiceClosed {
-					break
-				} else {
-					//fmt.Println("close conn", conn.fd, err)
-					conn.Close(err)
-					atomic.AddInt32(&clientCount, -1)
-				}
+				break
 			} else {
-				if context.(rune) == 'r' {
-					//fmt.Println("recv", bytestransfer)
-					conn.Send(buff[:bytestransfer], 'w')
+				if res.Err != nil {
+					res.Conn.Close(err)
+					atomic.AddInt32(&clientCount, -1)
+				} else if res.Context.(rune) == 'r' {
+					res.Conn.Send(res.Buff[:res.Bytestransfer], 'w')
 				} else {
-					conn.Recv(buff[:cap(buff)], 'r')
+					res.Conn.Recv(res.Buff[:cap(res.Buff)], 'r')
 				}
 			}
 
@@ -154,10 +150,12 @@ func TestDefault(t *testing.T) {
 	c.Send(wx, 'w')
 
 	for {
-		conn, _, _, context, err := GetCompleteStatus()
-		if nil == err {
-			if context.(rune) == 'w' {
-				conn.Close(ErrActiveClose)
+		res, err := GetCompleteStatus()
+		if nil != err {
+			break
+		} else if nil == res.Err {
+			if res.Context.(rune) == 'w' {
+				res.Conn.Close(ErrActiveClose)
 				break
 			}
 		}
@@ -197,16 +195,18 @@ func TestSendMutilBuff(t *testing.T) {
 	cc := 0
 
 	for {
-		conn, _, _, context, err := GetCompleteStatus()
-		if nil == err {
-			if context.(rune) == 'w' {
+		res, err := GetCompleteStatus()
+		if nil != err {
+			break
+		} else if nil == res.Err {
+			if res.Context.(rune) == 'w' {
 				cc++
 				if cc == 5 {
-					conn.Close(ErrActiveClose)
+					res.Conn.Close(ErrActiveClose)
 					break
 				}
 			} else {
-				c.Recv(rx, 'r')
+				res.Conn.Recv(rx, 'r')
 			}
 		}
 	}
@@ -313,12 +313,14 @@ func TestSendBigBuff(t *testing.T) {
 	defer c.Close(ErrActiveClose)
 
 	for {
-		conn, _, _, context, err := w.GetCompleteStatus()
+		res, err := w.GetCompleteStatus()
 		if nil == err {
-			if context.(rune) == 'w' {
+			break
+		} else if nil == res.Err {
+			if res.Context.(rune) == 'w' {
 				break
 			} else {
-				conn.Recv(rx, 'r')
+				res.Conn.Recv(rx, 'r')
 			}
 		}
 	}
@@ -361,14 +363,16 @@ func TestShareBuffer(t *testing.T) {
 	count := 0
 
 	for {
-		conn, buff, _, context, err := w.GetCompleteStatus()
-		if nil == err {
-			if context.(rune) == 'w' {
+		res, err := w.GetCompleteStatus()
+		if nil != err {
+			break
+		} else if nil == res.Err {
+			if res.Context.(rune) == 'w' {
 				//使用ShareBuff,不需要提供buff
-				conn.Recv(nil, 'r')
+				res.Conn.Recv(nil, 'r')
 			} else {
 				//使用关闭归还buffpool供其它连接使用
-				buffpool.Release(buff)
+				buffpool.Release(res.Buff)
 				count++
 				if count == 10 {
 					break
@@ -533,15 +537,14 @@ func TestRecvTimeout1(t *testing.T) {
 	count := 0
 
 	for {
-		conn, _, _, _, err := w.GetCompleteStatus()
+		res, err := w.GetCompleteStatus()
 		if nil != err {
-			fmt.Println(err)
-			if err != ErrRecvTimeout {
-				panic("err type mismatch")
-			}
+			break
+		} else if nil != res.Err {
+			assert.Equal(t, res.Err, ErrRecvTimeout)
 			count++
 			if count == 2 {
-				conn.Close(ErrActiveClose)
+				res.Conn.Close(ErrActiveClose)
 				break
 			}
 		}
@@ -605,11 +608,13 @@ func TestRecvTimeout2(t *testing.T) {
 
 	go func() {
 		for {
-			_, _, _, _, err := w.GetCompleteStatus()
+			res, err := w.GetCompleteStatus()
 			if nil != err {
-				if err == ErrServiceClosed {
+				break
+			} else if nil != res.Err {
+				if res.Err == ErrServiceClosed {
 					break
-				} else if err == ErrRecvTimeout {
+				} else if res.Err == ErrRecvTimeout {
 					panic("err type mismatch")
 				}
 			}
@@ -677,11 +682,13 @@ func TestRecvTimeout3(t *testing.T) {
 
 	go func() {
 		for {
-			_, _, _, _, err := w.GetCompleteStatus()
+			res, err := w.GetCompleteStatus()
 			if nil != err {
-				if err == ErrServiceClosed {
+				break
+			} else if nil != res.Err {
+				if res.Err == ErrServiceClosed {
 					break
-				} else if err == ErrRecvTimeout {
+				} else if res.Err == ErrRecvTimeout {
 					c.Close(nil)
 				}
 			}
@@ -752,15 +759,17 @@ func TestSendTimeout1(t *testing.T) {
 	c.Send(wx, 'w')
 
 	for {
-		conn, _, _, _, err := w.GetCompleteStatus()
+		res, err := w.GetCompleteStatus()
 		if nil != err {
-			if err != ErrSendTimeout {
+			break
+		} else if nil != res.Err {
+			if res.Err != ErrSendTimeout {
 				panic("err type mismatch")
 			}
-			conn.Close(err)
+			res.Conn.Close(res.Err)
 			break
 		} else {
-			c.Send(wx, 'w')
+			res.Conn.Send(wx, 'w')
 		}
 	}
 
@@ -822,15 +831,14 @@ func TestSendTimeout2(t *testing.T) {
 
 	go func() {
 		for {
-			conn, _, _, _, err := w.GetCompleteStatus()
+			res, err := w.GetCompleteStatus()
 			if nil != err {
-				if err == ErrServiceClosed {
-					break
-				} else if err == ErrRecvTimeout {
-					panic("err type mismatch")
-				}
+				break
+			} else if nil != res.Err {
+				assert.Equal(t, ErrCloseServiceClosed, res.Err)
+				break
 			} else {
-				conn.Send(wx, 'w')
+				res.Conn.Send(wx, 'w')
 			}
 		}
 		close(die)
@@ -899,13 +907,15 @@ func TestSendTimeout3(t *testing.T) {
 	c.SetSendTimeout(time.Second)
 
 	for {
-		conn, _, bytestransfer, _, err := w.GetCompleteStatus()
+		res, err := w.GetCompleteStatus()
 		if nil != err {
-			assert.Equal(t, ErrSendTimeout, err)
+			break
+		} else if nil != res.Err {
+			assert.Equal(t, ErrSendTimeout, res.Err)
 			//超时，部分发送
-			assert.NotEqual(t, 0, bytestransfer)
-			assert.NotEqual(t, 1024*1024, bytestransfer)
-			conn.Close(err)
+			assert.NotEqual(t, 0, res.Bytestransfer)
+			assert.NotEqual(t, 1024*1024, res.Bytestransfer)
+			res.Conn.Close(res.Err)
 			break
 		}
 	}
@@ -1084,23 +1094,21 @@ func testParallel(t *testing.T, par int, msgsize int) {
 	go func() {
 
 		for {
-			conn, buff, bytestransfer, context, err := w.GetCompleteStatus()
+			res, err := w.GetCompleteStatus()
 			if nil != err {
-				if err == ErrServiceClosed {
-					break
-				} else {
-					conn.Close(err)
-				}
+				break
 			} else {
-				if context.(rune) == 'r' {
-					nbytes += bytestransfer
+				if nil != res.Err {
+					res.Conn.Close(res.Err)
+				} else if res.Context.(rune) == 'r' {
+					nbytes += res.Bytestransfer
 					if nbytes >= ntotal {
 						t.Log("completed:", nbytes)
 						close(die)
 						break
 					}
 				} else {
-					conn.Recv(buff[:cap(buff)], 'r')
+					res.Conn.Recv(res.Buff[:cap(res.Buff)], 'r')
 				}
 			}
 		}
@@ -1148,7 +1156,7 @@ func BenchmarkEcho64KParallel(b *testing.B) {
 
 */
 func BenchmarkEcho128KParallel(b *testing.B) {
-	benchmarkEcho(b, 128*1024, 128)
+	benchmarkEcho(b, 128*1024, 64)
 }
 
 func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
@@ -1191,27 +1199,22 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 
 	count := 0
 	target := bufsize * b.N * numconn
-	sendsize := 0
 
 	for {
-		conn, buff, bytestransfer, context, err := w.GetCompleteStatus()
+		res, err := w.GetCompleteStatus()
 		if nil != err {
-			if err == ErrServiceClosed {
+			break
+		} else if nil != res.Err {
+			res.Conn.Close(res.Err)
+		} else if res.Context.(rune) == 'r' {
+			count += res.Bytestransfer
+			if count >= target {
 				break
-			} else {
-				conn.Close(err)
 			}
+			res.Conn.Send(res.Buff[:res.Bytestransfer], 'w')
 		} else {
-			if context.(rune) == 'r' {
-				count += bytestransfer
-				if count >= target {
-					break
-				}
-				conn.Send(buff[:bytestransfer], 'w')
-			} else {
-				sendsize += bytestransfer
-				conn.Recv(buff[:cap(buff)], 'r')
-			}
+			res.Conn.Recv(res.Buff[:cap(res.Buff)], 'r')
 		}
+
 	}
 }

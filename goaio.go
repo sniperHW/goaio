@@ -11,17 +11,18 @@ import (
 )
 
 var (
-	ErrEof           = errors.New("EOF")
-	ErrRecvTimeout   = errors.New("RecvTimeout")
-	ErrSendTimeout   = errors.New("SendTimetout")
-	ErrConnClosed    = errors.New("conn closed")
-	ErrServiceClosed = errors.New("service closed")
-	ErrUnsupportConn = errors.New("net.Conn does implement net.RawConn")
-	ErrBusy          = errors.New("busy")
-	ErrWatchFailed   = errors.New("watch failed")
-	ErrActiveClose   = errors.New("active close")
-	ErrCloseNone     = errors.New("close no reason")
-	ErrCloseGC       = errors.New("close by gc")
+	ErrEof                = errors.New("EOF")
+	ErrRecvTimeout        = errors.New("RecvTimeout")
+	ErrSendTimeout        = errors.New("SendTimetout")
+	ErrConnClosed         = errors.New("conn closed")
+	ErrServiceClosed      = errors.New("service closed")
+	ErrUnsupportConn      = errors.New("net.Conn does implement net.RawConn")
+	ErrBusy               = errors.New("busy")
+	ErrWatchFailed        = errors.New("watch failed")
+	ErrActiveClose        = errors.New("active close")
+	ErrCloseNone          = errors.New("close no reason")
+	ErrCloseGC            = errors.New("close by gc")
+	ErrCloseServiceClosed = errors.New("close because of service closed")
 )
 
 const (
@@ -134,6 +135,15 @@ func (this *aioContextQueue) setDeadline(deadline time.Time) bool {
 	}
 }
 
+type AIOResult struct {
+	Conn          *AIOConn
+	Buff          []byte
+	Context       interface{}
+	Err           error
+	Bytestransfer int
+}
+
+//internal use only
 type aioResult struct {
 	ppnext        *aioResult
 	conn          *AIOConn
@@ -230,7 +240,7 @@ func (this *completetionQueue) postCompleteStatus(c *AIOConn, buff []byte, bytes
 	}
 }
 
-func (this *completetionQueue) getCompleteStatus() (c *AIOConn, buff []byte, bytestransfer int, context interface{}, err error) {
+func (this *completetionQueue) getCompleteStatus() (res AIOResult, err error) {
 	this.mu.Lock()
 
 	for this.completeQueue.empty() {
@@ -245,12 +255,11 @@ func (this *completetionQueue) getCompleteStatus() (c *AIOConn, buff []byte, byt
 	}
 
 	e := this.completeQueue.pop()
-
-	err = e.err
-	c = e.conn
-	buff = e.buff
-	bytestransfer = e.bytestransfer
-	context = e.context
+	res.Err = e.err
+	res.Conn = e.conn
+	res.Buff = e.buff
+	res.Context = e.context
+	res.Bytestransfer = e.bytestransfer
 
 	e.buff = nil
 	e.context = nil
@@ -667,7 +676,7 @@ func (this *connMgr) close() {
 	this.Unlock()
 
 	for _, v := range conns {
-		v.Close(ErrServiceClosed)
+		v.Close(ErrCloseServiceClosed)
 	}
 }
 
@@ -790,7 +799,7 @@ func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfe
 	this.completeQueue.postCompleteStatus(c, buff, bytestransfer, err, context)
 }
 
-func (this *AIOService) GetCompleteStatus() (*AIOConn, []byte, int, interface{}, error) {
+func (this *AIOService) GetCompleteStatus() (AIOResult, error) {
 	return this.completeQueue.getCompleteStatus()
 }
 
@@ -826,7 +835,7 @@ func Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
 	return defalutService.Bind(conn, option)
 }
 
-func GetCompleteStatus() (*AIOConn, []byte, int, interface{}, error) {
+func GetCompleteStatus() (AIOResult, error) {
 	createOnce.Do(func() {
 		defalutService = NewAIOService(DefaultWorkerCount)
 	})

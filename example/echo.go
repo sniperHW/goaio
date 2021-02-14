@@ -29,19 +29,15 @@ func main() {
 
 	go func() {
 		for {
-			conn, buff, bytestransfer, context, err := goaio.GetCompleteStatus()
+			res, err := goaio.GetCompleteStatus()
 			if nil != err {
-				if err == goaio.ErrServiceClosed {
-					return
-				}
-				fmt.Println(err)
-				conn.Close(err)
+				return
+			} else if nil != res.Err {
+				res.Conn.Close(res.Err)
+			} else if res.Context.(rune) == 'r' {
+				res.Conn.Send(res.Buff[:res.Bytestransfer], 'w')
 			} else {
-				if context.(rune) == 'r' {
-					conn.Send(buff[:bytestransfer], 'w')
-				} else {
-					conn.Recv(buff[:cap(buff)], 'r')
-				}
+				res.Conn.Recv(res.Buff[:cap(res.Buff)], 'r')
 			}
 		}
 	}()
