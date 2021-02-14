@@ -1148,7 +1148,7 @@ func BenchmarkEcho64KParallel(b *testing.B) {
 
 */
 func BenchmarkEcho128KParallel(b *testing.B) {
-	benchmarkEcho(b, 128*1024, 64)
+	benchmarkEcho(b, 128*1024, 128)
 }
 
 func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
