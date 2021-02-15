@@ -68,7 +68,7 @@ type AIOConn struct {
 	timer         *Timer
 	reason        error
 	sharebuff     ShareBuffer
-	UserData      interface{}
+	userData      interface{}
 	doTimeout     *Timer
 	tqIdx         int
 }
@@ -273,7 +273,7 @@ func (this *completetionQueue) getCompleteStatus() (res AIOResult, err error) {
 }
 
 func (this *AIOConn) GetUserData() interface{} {
-	return this.UserData
+	return this.userData
 }
 
 func (this *AIOConn) Close(reason error) {
@@ -775,7 +775,7 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 		sharebuff: option.ShareBuff,
 		r:         newAioContextQueue(option.RecvqueSize),
 		w:         newAioContextQueue(option.SendqueSize),
-		UserData:  option.UserData,
+		userData:  option.UserData,
 		//todo:根据各tq的负载情况动态调整tqIdx以平衡worker线程的工作负载
 		tqIdx: fd % len(this.tq),
 	}

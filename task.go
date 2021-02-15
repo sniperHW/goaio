@@ -12,7 +12,7 @@ var (
 type taskQueue struct {
 	mu        sync.Mutex
 	cond      *sync.Cond
-	head      *AIOConn
+	tail      *AIOConn
 	closed    bool
 	closeOnce sync.Once
 	waitCount int
@@ -41,14 +41,14 @@ func (this *taskQueue) push(t *AIOConn) error {
 	}
 
 	var head *AIOConn
-	if this.head == nil {
+	if this.tail == nil {
 		head = t
 	} else {
-		head = this.head.nnext
-		this.head.nnext = t
+		head = this.tail.nnext
+		this.tail.nnext = t
 	}
 	t.nnext = head
-	this.head = t
+	this.tail = t
 
 	waitCount := this.waitCount
 	this.mu.Unlock()
@@ -62,7 +62,7 @@ func (this *taskQueue) push(t *AIOConn) error {
 
 func (this *taskQueue) pop() (*AIOConn, error) {
 	this.mu.Lock()
-	for this.head == nil {
+	for this.tail == nil {
 		if this.closed {
 			this.mu.Unlock()
 			return nil, Error_TaskQueue_Closed
@@ -73,11 +73,11 @@ func (this *taskQueue) pop() (*AIOConn, error) {
 		}
 	}
 
-	e := this.head.nnext
-	if e == this.head {
-		this.head = nil
+	e := this.tail.nnext
+	if e == this.tail {
+		this.tail = nil
 	} else {
-		this.head.nnext = e.nnext
+		this.tail.nnext = e.nnext
 	}
 
 	e.nnext = nil
