@@ -73,16 +73,11 @@ func (this *taskQueue) pop() (*AIOConn, error) {
 		}
 	}
 
-	e := this.tail.nnext
-	if e == this.tail {
-		this.tail = nil
-	} else {
-		this.tail.nnext = e.nnext
-	}
-
-	e.nnext = nil
+	head := this.tail.nnext
+	this.tail.nnext = nil
+	this.tail = nil
 
 	this.mu.Unlock()
 
-	return e, nil
+	return head, nil
 }

@@ -23,7 +23,36 @@ func TestTaskQueue(t *testing.T) {
 		userData: 4,
 	})
 
-	var r *AIOConn
+	head, _ := q.pop()
+	i := 1
+	for head != nil {
+		assert.Equal(t, head.userData.(int), i)
+		head = head.nnext
+		i++
+	}
+
+	q.push(&AIOConn{
+		userData: 5,
+	})
+	q.push(&AIOConn{
+		userData: 6,
+	})
+	q.push(&AIOConn{
+		userData: 7,
+	})
+	q.push(&AIOConn{
+		userData: 8,
+	})
+
+	head, _ = q.pop()
+	i = 5
+	for head != nil {
+		assert.Equal(t, head.userData.(int), i)
+		head = head.nnext
+		i++
+	}
+
+	/*var r *AIOConn
 
 	r, _ = q.pop()
 	assert.Equal(t, r.userData.(int), 1)
@@ -35,6 +64,6 @@ func TestTaskQueue(t *testing.T) {
 	assert.Equal(t, r.userData.(int), 3)
 
 	r, _ = q.pop()
-	assert.Equal(t, r.userData.(int), 4)
+	assert.Equal(t, r.userData.(int), 4)*/
 
 }

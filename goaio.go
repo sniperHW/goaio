@@ -32,7 +32,7 @@ const (
 )
 
 var (
-	DefaultWorkerCount = 4
+	DefaultWorkerCount = 1
 )
 
 type ShareBuffer interface {
@@ -702,15 +702,19 @@ func NewAIOService(worker int) *AIOService {
 			s.tq = append(s.tq, tq)
 			go func() {
 				s.waitgroup.Add(1)
+				defer s.waitgroup.Done()
 				for {
-					v, err := tq.pop()
+					head, err := tq.pop()
 					if nil != err {
-						break
+						return
 					} else {
-						v.Do()
+						for head != nil {
+							next := head.nnext
+							head.Do()
+							head = next
+						}
 					}
 				}
-				s.waitgroup.Done()
 			}()
 		}
 
