@@ -240,6 +240,8 @@ func TestGC(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	_ = NewAIOService(2)
+
 	runtime.GC()
 
 	ln.Close()

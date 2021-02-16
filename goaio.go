@@ -405,7 +405,7 @@ func (this *AIOConn) canWrite() bool {
 }
 
 func (this *AIOConn) Send(buff []byte, context interface{}) error {
-	if atomic.LoadInt32(&this.service.closed) == 1 {
+	if atomic.LoadInt32(this.service.closed) == 1 {
 		return ErrServiceClosed
 	}
 
@@ -447,7 +447,7 @@ func (this *AIOConn) Send(buff []byte, context interface{}) error {
 }
 
 func (this *AIOConn) Recv(buff []byte, context interface{}) error {
-	if atomic.LoadInt32(&this.service.closed) == 1 {
+	if atomic.LoadInt32(this.service.closed) == 1 {
 		return ErrServiceClosed
 	}
 
@@ -636,8 +636,8 @@ type AIOService struct {
 	completeQueue *completetionQueue
 	tq            []*taskQueue
 	poller        pollerI
-	closed        int32
-	waitgroup     sync.WaitGroup
+	closed        *int32
+	waitgroup     *sync.WaitGroup
 	closeOnce     sync.Once
 	connMgr       []*connMgr
 }
@@ -682,11 +682,13 @@ func (this *connMgr) close() {
 
 func NewAIOService(worker int) *AIOService {
 	if poller, err := openPoller(); nil == err {
+		waitgroup := &sync.WaitGroup{}
 		s := &AIOService{}
 		s.completeQueue = newCompletetionQueue()
-		//s.tq = NewTaskQueue()
 		s.poller = poller
 		s.connMgr = make([]*connMgr, 127)
+		s.waitgroup = waitgroup
+		s.closed = new(int32)
 		for k, _ := range s.connMgr {
 			s.connMgr[k] = &connMgr{
 				conns: map[*AIOConn]int{},
@@ -701,8 +703,8 @@ func NewAIOService(worker int) *AIOService {
 			tq := NewTaskQueue()
 			s.tq = append(s.tq, tq)
 			go func() {
-				s.waitgroup.Add(1)
-				defer s.waitgroup.Done()
+				waitgroup.Add(1)
+				defer waitgroup.Done()
 				for {
 					head, err := tq.pop()
 					if nil != err {
@@ -718,7 +720,11 @@ func NewAIOService(worker int) *AIOService {
 			}()
 		}
 
-		go s.poller.wait(&s.closed)
+		go poller.wait(s.closed)
+
+		runtime.SetFinalizer(s, func(s *AIOService) {
+			s.Close()
+		})
 
 		return s
 	} else {
@@ -743,7 +749,7 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 	this.Lock()
 	defer this.Unlock()
 
-	if 1 == this.closed {
+	if 1 == *this.closed {
 		return nil, ErrServiceClosed
 	}
 
@@ -809,9 +815,10 @@ func (this *AIOService) GetCompleteStatus() (AIOResult, error) {
 
 func (this *AIOService) Close() {
 	this.closeOnce.Do(func() {
+		runtime.SetFinalizer(this, nil)
 		this.Lock()
 		defer this.Unlock()
-		atomic.StoreInt32(&this.closed, 1)
+		atomic.StoreInt32(this.closed, 1)
 		this.poller.trigger()
 		for _, v := range this.connMgr {
 			v.close()
