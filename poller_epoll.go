@@ -21,6 +21,7 @@ func openPoller() (*epoll, error) {
 	poller := new(epoll)
 	poller.fd = epollFD
 	poller.fd2Conn = fd2Conn(make([]sync.Map, hashSize))
+	poller.die = make(chan struct{})
 
 	r0, _, e0 := syscall.Syscall(syscall.SYS_EVENTFD2, 0, 0, 0)
 	if e0 != 0 {
@@ -47,6 +48,11 @@ func openPoller() (*epoll, error) {
 	poller.wfd = int(r0)
 
 	return poller, nil
+}
+
+func (p *epoll) close() {
+	p.trigger()
+	<-p.die
 }
 
 func (p *epoll) trigger() error {
@@ -112,6 +118,7 @@ func (p *epoll) wait(stoped *int32) {
 	defer func() {
 		syscall.Close(p.fd)
 		syscall.Close(p.wfd)
+		close(p.die)
 	}()
 
 	eventlist := make([]syscall.EpollEvent, 64)

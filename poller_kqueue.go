@@ -20,6 +20,7 @@ func openPoller() (*kqueue, error) {
 	poller := new(kqueue)
 	poller.fd = kfd
 	poller.fd2Conn = fd2Conn(make([]sync.Map, hashSize))
+	poller.die = make(chan struct{})
 
 	_, err = syscall.Kevent(poller.fd, []syscall.Kevent_t{{
 		Ident:  0,
@@ -33,6 +34,11 @@ func openPoller() (*kqueue, error) {
 	}
 
 	return poller, nil
+}
+
+func (p *kqueue) close() {
+	p.trigger()
+	<-p.die
 }
 
 func (p *kqueue) trigger() error {
@@ -98,7 +104,10 @@ func (p *kqueue) unwatch(conn *AIOConn) bool {
 
 func (p *kqueue) wait(stoped *int32) {
 
-	defer syscall.Close(p.fd)
+	defer func() {
+		syscall.Close(p.fd)
+		close(p.die)
+	}()
 
 	eventlist := make([]syscall.Kevent_t, 64)
 

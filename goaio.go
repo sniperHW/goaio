@@ -110,14 +110,26 @@ func (this *aioContextQueue) add(c aioContext) error {
 	}
 }
 
+func (this *aioContextQueue) dropLast() {
+	if this.head != this.tail {
+		this.queue[this.tail].buff = nil
+		this.queue[this.tail].context = nil
+		if this.tail == 0 {
+			this.tail = len(this.queue) - 1
+		} else {
+			this.tail--
+		}
+	}
+}
+
 func (this *aioContextQueue) front() *aioContext {
 	return &this.queue[this.head]
 }
 
 func (this *aioContextQueue) popFront() {
 	if this.head != this.tail {
-		this.queue[this.tail].buff = nil
-		this.queue[this.tail].context = nil
+		this.queue[this.head].buff = nil
+		this.queue[this.head].context = nil
 		this.head = (this.head + 1) % len(this.queue)
 	}
 }
@@ -422,9 +434,6 @@ func (this *AIOConn) Send(buff []byte, context interface{}) error {
 
 		if 0 != timeout {
 			deadline = time.Now().Add(timeout)
-			if nil == this.timer {
-				this.timer = newTimer(timeout, this.onTimeout)
-			}
 		}
 
 		if err := this.w.add(aioContext{
@@ -435,7 +444,14 @@ func (this *AIOConn) Send(buff []byte, context interface{}) error {
 			return err
 		}
 
-		this.service.addIO(this)
+		if !this.service.addIO(this) {
+			this.w.dropLast()
+			return ErrServiceClosed
+		}
+
+		if !deadline.IsZero() && nil == this.timer {
+			this.timer = newTimer(timeout, this.onTimeout)
+		}
 
 		if this.writeable && !this.doing {
 			this.doing = true
@@ -464,9 +480,6 @@ func (this *AIOConn) Recv(buff []byte, context interface{}) error {
 
 		if 0 != timeout {
 			deadline = time.Now().Add(timeout)
-			if nil == this.timer {
-				this.timer = newTimer(timeout, this.onTimeout)
-			}
 		}
 
 		if err := this.r.add(aioContext{
@@ -477,7 +490,14 @@ func (this *AIOConn) Recv(buff []byte, context interface{}) error {
 			return err
 		}
 
-		this.service.addIO(this)
+		if !this.service.addIO(this) {
+			this.r.dropLast()
+			return ErrServiceClosed
+		}
+
+		if !deadline.IsZero() && nil == this.timer {
+			this.timer = newTimer(timeout, this.onTimeout)
+		}
 
 		if this.readable && !this.doing {
 			this.doing = true
@@ -648,11 +668,14 @@ type connMgr struct {
 	closed bool
 }
 
-func (this *connMgr) addIO(c *AIOConn) {
+func (this *connMgr) addIO(c *AIOConn) bool {
 	this.Lock()
 	defer this.Unlock()
 	if !this.closed {
 		this.conns[c] = this.conns[c] + 1
+		return true
+	} else {
+		return false
 	}
 }
 
@@ -736,8 +759,8 @@ func (this *AIOService) unwatch(c *AIOConn) {
 	this.poller.unwatch(c)
 }
 
-func (this *AIOService) addIO(c *AIOConn) {
-	this.connMgr[c.fd%len(this.connMgr)].addIO(c)
+func (this *AIOService) addIO(c *AIOConn) bool {
+	return this.connMgr[c.fd%len(this.connMgr)].addIO(c)
 }
 
 func (this *AIOService) subIO(c *AIOConn) {
@@ -819,7 +842,7 @@ func (this *AIOService) Close() {
 		this.Lock()
 		defer this.Unlock()
 		atomic.StoreInt32(this.closed, 1)
-		this.poller.trigger()
+		this.poller.close()
 		for _, v := range this.connMgr {
 			v.close()
 		}

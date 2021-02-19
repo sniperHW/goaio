@@ -30,10 +30,10 @@ func (self *fd2Conn) remove(conn *AIOConn) {
 }
 
 type poller_base struct {
-	fd        int
-	fd2Conn   fd2Conn
-	ver       int64
-	closeOnce sync.Once
+	fd      int
+	fd2Conn fd2Conn
+	ver     int64
+	die     chan struct{}
 }
 
 func (this *poller_base) updatePollerVersionOnWatch() int32 {
@@ -68,6 +68,7 @@ func (this *poller_base) updatePollerVersionOnWait() int32 {
 }
 
 type pollerI interface {
+	close()
 	trigger() error
 	watch(*AIOConn) bool
 	unwatch(*AIOConn) bool
