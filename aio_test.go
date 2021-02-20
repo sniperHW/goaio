@@ -228,7 +228,7 @@ func TestBusySend(t *testing.T) {
 	}()
 
 	go func() {
-		time.Sleep(time.Second * 5)
+		time.Sleep(time.Second * 2)
 		c.Close(ErrActiveClose)
 	}()
 
