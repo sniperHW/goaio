@@ -162,6 +162,81 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+func TestBusySend(t *testing.T) {
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	ln, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				buff := make([]byte, 4096)
+				for {
+					_, err := conn.Read(buff)
+					if nil != err {
+						break
+					}
+				}
+			}()
+		}
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Bind(conn, AIOConnOption{})
+
+	if nil != err {
+		t.Fatal(err)
+	}
+
+	die := make(chan struct{})
+
+	go func() {
+		for {
+			res, err := GetCompleteStatus()
+			if nil != err {
+				break
+			} else if nil != res.Err {
+				break
+			}
+		}
+		close(die)
+	}()
+
+	go func() {
+		for {
+			if err := c.Send([]byte("string"), 'w'); nil != err {
+				if err == ErrActiveClose {
+					break
+				}
+			}
+		}
+	}()
+
+	go func() {
+		time.Sleep(time.Second * 5)
+		c.Close(ErrActiveClose)
+	}()
+
+	<-die
+
+	ln.Close()
+}
+
 func TestSendMutilBuff(t *testing.T) {
 	ln, serverDie := echoServer(t, 4096)
 

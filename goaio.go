@@ -318,8 +318,8 @@ func (this *AIOConn) processTimeout() {
 		for !this.r.empty() {
 			f := this.r.front()
 			if now.After(f.deadline) {
-				this.r.popFront()
 				this.service.postCompleteStatus(this, f.buff, 0, ErrRecvTimeout, f.context)
+				this.r.popFront()
 			} else {
 				break
 			}
@@ -330,8 +330,8 @@ func (this *AIOConn) processTimeout() {
 		for !this.w.empty() {
 			f := this.w.front()
 			if now.After(f.deadline) {
-				this.w.popFront()
 				this.service.postCompleteStatus(this, f.buff, f.offset, ErrSendTimeout, f.context)
+				this.w.popFront()
 			} else {
 				break
 			}
@@ -367,35 +367,39 @@ func (this *AIOConn) onTimeout(t *Timer) {
 func (this *AIOConn) SetRecvTimeout(timeout time.Duration) {
 	this.Lock()
 	defer this.Unlock()
-	if nil != this.timer {
-		this.timer.Cancel()
-		this.timer = nil
-	}
-	this.recvTimeout = timeout
-	if timeout != 0 {
-		deadline := time.Now().Add(timeout)
-		if this.r.setDeadline(deadline) {
-			this.timer = newTimer(timeout, this.onTimeout)
+	if !this.closed {
+		if nil != this.timer {
+			this.timer.Cancel()
+			this.timer = nil
 		}
-	} else {
-		this.r.setDeadline(time.Time{})
+		this.recvTimeout = timeout
+		if timeout != 0 {
+			deadline := time.Now().Add(timeout)
+			if this.r.setDeadline(deadline) {
+				this.timer = newTimer(timeout, this.onTimeout)
+			}
+		} else {
+			this.r.setDeadline(time.Time{})
+		}
 	}
 }
 
 func (this *AIOConn) SetSendTimeout(timeout time.Duration) {
 	this.Lock()
 	defer this.Unlock()
-	this.sendTimeout = timeout
-	if timeout != 0 {
-		deadline := time.Now().Add(timeout)
-		if this.w.setDeadline(deadline) {
-			this.timer = newTimer(timeout, this.onTimeout)
-		}
-	} else {
-		this.w.setDeadline(time.Time{})
-		if nil != this.timer {
-			this.timer.Cancel()
-			this.timer = nil
+	if !this.closed {
+		this.sendTimeout = timeout
+		if timeout != 0 {
+			deadline := time.Now().Add(timeout)
+			if this.w.setDeadline(deadline) {
+				this.timer = newTimer(timeout, this.onTimeout)
+			}
+		} else {
+			this.w.setDeadline(time.Time{})
+			if nil != this.timer {
+				this.timer.Cancel()
+				this.timer = nil
+			}
 		}
 	}
 }
@@ -571,8 +575,8 @@ func (this *AIOConn) doRead() {
 		}
 
 	} else {
-		this.r.popFront()
 		this.service.postCompleteStatus(this, buff, size, nil, c.context)
+		this.r.popFront()
 	}
 }
 
@@ -597,8 +601,8 @@ func (this *AIOConn) doWrite() {
 		}
 	} else {
 		if len(c.buff[c.offset:]) == size {
-			this.w.popFront()
 			this.service.postCompleteStatus(this, c.buff, len(c.buff), nil, c.context)
+			this.w.popFront()
 		} else {
 			c.offset += size
 			if ver == this.writeableVer {
