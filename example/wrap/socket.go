@@ -5,6 +5,7 @@ import (
 	"errors"
 	//"fmt"
 	"github.com/sniperHW/goaio"
+	"github.com/sniperHW/kendynet/util"
 	"net"
 	"runtime"
 	"sync"
@@ -21,8 +22,9 @@ type EnCoder interface {
 }
 
 type SocketSerice struct {
-	service     *goaio.AIOService
-	shareBuffer goaio.ShareBuffer
+	service           *goaio.AIOService
+	outboundTaskQueue *util.BlockQueue
+	shareBuffer       goaio.ShareBuffer
 }
 
 func (this *SocketSerice) completeRoutine(s *goaio.AIOService) {
@@ -50,20 +52,37 @@ func (this *SocketSerice) Bind(conn net.Conn, ud interface{}) (*goaio.AIOConn, e
 	})
 }
 
+func (this *SocketSerice) outboundRoutine(q *util.BlockQueue) {
+	for {
+		closed, res := q.GetNoWait()
+		if 0 != len(res) {
+			for _, v := range res {
+				v.(func())()
+			}
+		} else if closed {
+			return
+		}
+	}
+}
+
 func (this *SocketSerice) Close() {
 	this.service.Close()
+	this.outboundTaskQueue.Close()
 }
 
 func NewSocketSerice(shareBuffer goaio.ShareBuffer) *SocketSerice {
 
 	s := &SocketSerice{
-		service:     goaio.NewAIOService(4),
-		shareBuffer: shareBuffer,
+		service:           goaio.NewAIOService(4),
+		outboundTaskQueue: util.NewBlockQueue(1024),
+		shareBuffer:       shareBuffer,
 	}
 
 	for i := 0; i < 1; i++ {
 		go s.completeRoutine(s.service)
 	}
+
+	go s.outboundRoutine(s.outboundTaskQueue)
 
 	return s
 }
@@ -110,6 +129,7 @@ const (
 )
 
 type Socket struct {
+	service          *SocketSerice
 	muW              sync.Mutex
 	sendQueue        *list.List
 	flag             int32
@@ -246,8 +266,19 @@ func (s *Socket) onRecvComplete(r *goaio.AIOResult) {
 	}
 }
 
-func (s *Socket) doSend() (err error) {
+func (s *Socket) emitSendTask() {
 	s.ioWait.Add(1)
+	if nil != s.service.outboundTaskQueue.AddNoWait(s.doSend) {
+		s.ioWait.Done()
+		s.sendLock = false
+	} else {
+		s.sendLock = true
+	}
+}
+
+func (s *Socket) doSend() {
+	s.muW.Lock()
+	defer s.muW.Unlock()
 	var buff []byte
 
 	space := len(s.sendbuff)
@@ -272,10 +303,8 @@ func (s *Socket) doSend() (err error) {
 		buff = s.sendbuff[:offset]
 	}
 
-	if err = s.aioConn.Send(buff, 'w'); nil != err {
+	if nil != s.aioConn.Send(buff, 'w') {
 		s.ioWait.Done()
-	} else {
-		s.sendLock = true
 	}
 	return
 }
@@ -291,7 +320,7 @@ func (s *Socket) onSendComplete(r *goaio.AIOResult) {
 			}
 			s.muW.Unlock()
 		} else {
-			s.doSend()
+			s.emitSendTask()
 			s.muW.Unlock()
 		}
 	} else if s.testFlag(fclosed) {
@@ -341,12 +370,18 @@ func (s *Socket) SendMessage(msg Message) error {
 
 	s.sendQueue.PushBack(msg)
 
-	var err error
+	if !s.sendLock {
+		s.emitSendTask()
+	}
+
+	return nil
+
+	/*var err error
 
 	if !s.sendLock {
 		err = s.doSend()
 	}
-	return err
+	return err*/
 }
 
 func (s *Socket) shutdownRead() {
@@ -403,7 +438,7 @@ func NewSocket(service *SocketSerice, netConn net.Conn) *Socket {
 	if err != nil {
 		return nil
 	}
-
+	s.service = service
 	s.aioConn = c
 	s.sendQueueSize = 256
 	s.sendQueue = list.New()
