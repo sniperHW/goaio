@@ -155,135 +155,6 @@ type AIOResult struct {
 	Bytestransfer int
 }
 
-//internal use only
-type aioResult struct {
-	ppnext        *aioResult
-	conn          *AIOConn
-	buff          []byte
-	context       interface{}
-	err           error
-	bytestransfer int
-}
-
-type aioResultList struct {
-	head *aioResult
-}
-
-func (this *aioResultList) empty() bool {
-	return this.head == nil
-}
-
-func (this *aioResultList) push(item *aioResult) {
-	var head *aioResult
-	if this.head == nil {
-		head = item
-	} else {
-		head = this.head.ppnext
-		this.head.ppnext = item
-	}
-	item.ppnext = head
-	this.head = item
-}
-
-func (this *aioResultList) pop() *aioResult {
-	if this.head == nil {
-		return nil
-	} else {
-		item := this.head.ppnext
-		if item == this.head {
-			this.head = nil
-		} else {
-			this.head.ppnext = item.ppnext
-		}
-
-		item.ppnext = nil
-		return item
-	}
-}
-
-type completetionQueue struct {
-	mu            sync.Mutex
-	cond          *sync.Cond
-	completeQueue aioResultList
-	freeList      aioResultList
-	closed        bool
-	waitCount     int
-}
-
-func newCompletetionQueue() *completetionQueue {
-	q := &completetionQueue{}
-	q.cond = sync.NewCond(&q.mu)
-	return q
-}
-
-func (this *completetionQueue) close() {
-	this.mu.Lock()
-	this.closed = true
-	this.mu.Unlock()
-	this.cond.Broadcast()
-}
-
-func (this *completetionQueue) postCompleteStatus(c *AIOConn, buff []byte, bytestransfer int, err error, context interface{}) {
-	this.mu.Lock()
-	if this.closed {
-		this.mu.Unlock()
-	} else {
-
-		r := this.freeList.pop()
-		if nil == r {
-			r = &aioResult{}
-		}
-
-		r.conn = c
-		r.context = context
-		r.err = err
-		r.buff = buff
-		r.bytestransfer = bytestransfer
-
-		this.completeQueue.push(r)
-
-		waitCount := this.waitCount
-
-		this.mu.Unlock()
-
-		if waitCount > 0 {
-			this.cond.Signal()
-		}
-	}
-}
-
-func (this *completetionQueue) getCompleteStatus() (res AIOResult, err error) {
-	this.mu.Lock()
-
-	for this.completeQueue.empty() {
-		if this.closed {
-			err = ErrServiceClosed
-			this.mu.Unlock()
-			return
-		}
-		this.waitCount++
-		this.cond.Wait()
-		this.waitCount--
-	}
-
-	e := this.completeQueue.pop()
-	res.Err = e.err
-	res.Conn = e.conn
-	res.Buff = e.buff
-	res.Context = e.context
-	res.Bytestransfer = e.bytestransfer
-
-	e.buff = nil
-	e.context = nil
-	e.conn = nil
-
-	this.freeList.push(e)
-
-	this.mu.Unlock()
-
-	return
-}
-
 func (this *AIOConn) GetUserData() interface{} {
 	return this.userData
 }
@@ -654,7 +525,7 @@ func (this *AIOConn) Do() {
 
 type AIOService struct {
 	sync.Mutex
-	completeQueue *completetionQueue
+	completeQueue chan AIOResult
 	tq            []*taskQueue
 	poller        pollerI
 	closed        *int32
@@ -708,7 +579,7 @@ func NewAIOService(worker int) *AIOService {
 	if poller, err := openPoller(); nil == err {
 		waitgroup := &sync.WaitGroup{}
 		s := &AIOService{}
-		s.completeQueue = newCompletetionQueue()
+		s.completeQueue = make(chan AIOResult, 64)
 		s.poller = poller
 		s.connMgr = make([]*connMgr, 127)
 		s.waitgroup = waitgroup
@@ -828,11 +699,16 @@ func (this *AIOService) pushIOTask(c *AIOConn) error {
 
 func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfer int, err error, context interface{}) {
 	this.subIO(c)
-	this.completeQueue.postCompleteStatus(c, buff, bytestransfer, err, context)
+	this.completeQueue <- AIOResult{Conn: c, Buff: buff, Err: err, Bytestransfer: bytestransfer, Context: context}
 }
 
 func (this *AIOService) GetCompleteStatus() (AIOResult, error) {
-	return this.completeQueue.getCompleteStatus()
+	r, ok := <-this.completeQueue
+	if !ok {
+		return AIOResult{}, ErrServiceClosed
+	} else {
+		return r, nil
+	}
 }
 
 func (this *AIOService) Close() {
@@ -854,7 +730,7 @@ func (this *AIOService) Close() {
 		this.waitgroup.Wait()
 
 		//所有的待处理的AIO在此时已经被投递到completeQueue，可以关闭completeQueue。
-		this.completeQueue.close()
+		close(this.completeQueue) //.close()
 	})
 }
 

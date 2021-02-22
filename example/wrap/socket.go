@@ -71,8 +71,8 @@ func NewSocketSerice(shareBuffer goaio.ShareBuffer) *SocketSerice {
 		shareBuffer: shareBuffer,
 	}
 
-	for i := 0; i < 2; i++ {
-		se := goaio.NewAIOService(2)
+	for i := 0; i < 4; i++ {
+		se := goaio.NewAIOService(1)
 		ch := make(chan func(), 1024)
 		s.services = append(s.services, se)
 		s.outboundTaskQueue = append(s.outboundTaskQueue, ch)
@@ -264,14 +264,16 @@ func (s *Socket) onRecvComplete(r *goaio.AIOResult) {
 }
 
 func (s *Socket) emitSendTask() {
+	/*defer func() {
+		if r := recover(); r != nil {
+			s.ioWait.Done()
+			s.sendLock = false
+		}
+	}()*/
+
 	s.ioWait.Add(1)
-	select {
-	case s.ch <- s.doSend:
-		s.sendLock = true
-	default:
-		s.ioWait.Done()
-		s.sendLock = false
-	}
+	s.ch <- s.doSend
+	s.sendLock = true
 }
 
 func (s *Socket) doSend() {
