@@ -82,7 +82,7 @@ func (p *epoll) watch(conn *AIOConn) bool {
 
 	p.fd2Conn.add(conn)
 
-	err := syscall.EpollCtl(p.fd, syscall.EPOLL_CTL_ADD, int(conn.fd), &syscall.EpollEvent{Fd: int32(conn.fd), Events: syscall.EPOLLRDHUP | syscall.EPOLLIN | /*syscall.EPOLLOUT |*/ EPOLLET})
+	err := syscall.EpollCtl(p.fd, syscall.EPOLL_CTL_ADD, int(conn.fd), &syscall.EpollEvent{Fd: int32(conn.fd), Events: syscall.EPOLLRDHUP | syscall.EPOLLIN | syscall.EPOLLOUT | EPOLLET})
 	if nil != err {
 		p.fd2Conn.remove(conn)
 		return false

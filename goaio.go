@@ -523,9 +523,6 @@ func (this *AIOConn) onActive(ev int) {
 	}
 
 	if ev&EV_WRITE != 0 || ev&EV_ERROR != 0 {
-		if !this.writeable {
-			this.service.poller.disableWrite(this)
-		}
 		this.writeable = true
 		this.writeableVer++
 	}
@@ -599,7 +596,6 @@ func (this *AIOConn) doWrite() {
 	} else if err == syscall.EAGAIN {
 		if ver == this.writeableVer {
 			this.writeable = false
-			this.service.poller.enableWrite(this)
 		}
 	} else {
 		if len(c.buff[c.offset:]) == size {
@@ -609,7 +605,6 @@ func (this *AIOConn) doWrite() {
 			c.offset += size
 			if ver == this.writeableVer {
 				this.writeable = false
-				this.service.poller.enableWrite(this)
 			}
 		}
 	}
@@ -807,8 +802,6 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 
 	cc := &AIOConn{
 		fd:        fd,
-		readable:  false,
-		writeable: true,
 		rawconn:   conn,
 		service:   this,
 		sharebuff: option.ShareBuff,
