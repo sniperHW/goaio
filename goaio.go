@@ -523,9 +523,11 @@ func (this *AIOConn) onActive(ev int) {
 	}
 
 	if ev&EV_WRITE != 0 || ev&EV_ERROR != 0 {
+		if !this.writeable {
+			this.service.poller.disableWrite(this)
+		}
 		this.writeable = true
 		this.writeableVer++
-		this.service.poller.disableWrite(this)
 	}
 
 	if (this.canRead() || this.canWrite()) && !this.doing {
