@@ -3,9 +3,8 @@ package wrap
 import (
 	"container/list"
 	"errors"
-	//"fmt"
 	"github.com/sniperHW/goaio"
-	"github.com/sniperHW/kendynet/util"
+	"math/rand"
 	"net"
 	"runtime"
 	"sync"
@@ -22,8 +21,8 @@ type EnCoder interface {
 }
 
 type SocketSerice struct {
-	service           *goaio.AIOService
-	outboundTaskQueue *util.BlockQueue
+	services          []*goaio.AIOService
+	outboundTaskQueue []chan func()
 	shareBuffer       goaio.ShareBuffer
 }
 
@@ -43,46 +42,43 @@ func (this *SocketSerice) completeRoutine(s *goaio.AIOService) {
 	}
 }
 
-func (this *SocketSerice) Bind(conn net.Conn, ud interface{}) (*goaio.AIOConn, error) {
-	return this.service.Bind(conn, goaio.AIOConnOption{
+func (this *SocketSerice) Bind(conn net.Conn, ud interface{}) (*goaio.AIOConn, chan func(), error) {
+	idx := rand.Int() % len(this.services)
+	c, err := this.services[idx].Bind(conn, goaio.AIOConnOption{
 		SendqueSize: 1,
 		RecvqueSize: 1,
 		ShareBuff:   this.shareBuffer,
 		UserData:    ud,
 	})
+	return c, this.outboundTaskQueue[idx], err
 }
 
-func (this *SocketSerice) outboundRoutine(q *util.BlockQueue) {
-	for {
-		closed, res := q.GetNoWait()
-		if 0 != len(res) {
-			for _, v := range res {
-				v.(func())()
-			}
-		} else if closed {
-			return
-		}
+func (this *SocketSerice) outboundRoutine(q chan func()) {
+	for v := range q {
+		v()
 	}
 }
 
 func (this *SocketSerice) Close() {
-	this.service.Close()
-	this.outboundTaskQueue.Close()
+	for i, _ := range this.services {
+		this.services[i].Close()
+		close(this.outboundTaskQueue[i])
+	}
 }
 
 func NewSocketSerice(shareBuffer goaio.ShareBuffer) *SocketSerice {
-
 	s := &SocketSerice{
-		service:           goaio.NewAIOService(4),
-		outboundTaskQueue: util.NewBlockQueue(1024),
-		shareBuffer:       shareBuffer,
+		shareBuffer: shareBuffer,
 	}
 
-	for i := 0; i < 1; i++ {
-		go s.completeRoutine(s.service)
+	for i := 0; i < 2; i++ {
+		se := goaio.NewAIOService(2)
+		ch := make(chan func(), 1024)
+		s.services = append(s.services, se)
+		s.outboundTaskQueue = append(s.outboundTaskQueue, ch)
+		go s.completeRoutine(se)
+		go s.outboundRoutine(ch)
 	}
-
-	go s.outboundRoutine(s.outboundTaskQueue)
 
 	return s
 }
@@ -129,7 +125,7 @@ const (
 )
 
 type Socket struct {
-	service          *SocketSerice
+	//service          *SocketSerice
 	muW              sync.Mutex
 	sendQueue        *list.List
 	flag             int32
@@ -147,6 +143,7 @@ type Socket struct {
 	ioWait           sync.WaitGroup
 	sendOverChan     chan struct{}
 	netconn          net.Conn
+	ch               chan func()
 }
 
 func (s *Socket) setFlag(flag int32) {
@@ -268,11 +265,12 @@ func (s *Socket) onRecvComplete(r *goaio.AIOResult) {
 
 func (s *Socket) emitSendTask() {
 	s.ioWait.Add(1)
-	if nil != s.service.outboundTaskQueue.AddNoWait(s.doSend) {
+	select {
+	case s.ch <- s.doSend:
+		s.sendLock = true
+	default:
 		s.ioWait.Done()
 		s.sendLock = false
-	} else {
-		s.sendLock = true
 	}
 }
 
@@ -306,7 +304,6 @@ func (s *Socket) doSend() {
 	if nil != s.aioConn.Send(buff, 'w') {
 		s.ioWait.Done()
 	}
-	return
 }
 
 func (s *Socket) onSendComplete(r *goaio.AIOResult) {
@@ -375,13 +372,6 @@ func (s *Socket) SendMessage(msg Message) error {
 	}
 
 	return nil
-
-	/*var err error
-
-	if !s.sendLock {
-		err = s.doSend()
-	}
-	return err*/
 }
 
 func (s *Socket) shutdownRead() {
@@ -433,12 +423,11 @@ func (s *Socket) Close(reason error, delay time.Duration) {
 func NewSocket(service *SocketSerice, netConn net.Conn) *Socket {
 
 	s := &Socket{}
-
-	c, err := service.Bind(netConn, s)
+	c, ch, err := service.Bind(netConn, s)
 	if err != nil {
 		return nil
 	}
-	s.service = service
+	s.ch = ch
 	s.aioConn = c
 	s.sendQueueSize = 256
 	s.sendQueue = list.New()
