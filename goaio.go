@@ -148,6 +148,7 @@ func (this *aioContextQueue) setDeadline(deadline time.Time) bool {
 }
 
 type AIOResult struct {
+	ppnext        *AIOResult
 	Conn          *AIOConn
 	Buff          []byte
 	Context       interface{}
@@ -155,26 +156,16 @@ type AIOResult struct {
 	Bytestransfer int
 }
 
-//internal use only
-type aioResult struct {
-	ppnext        *aioResult
-	conn          *AIOConn
-	buff          []byte
-	context       interface{}
-	err           error
-	bytestransfer int
-}
-
 type aioResultList struct {
-	head *aioResult
+	head *AIOResult
 }
 
 func (this *aioResultList) empty() bool {
 	return this.head == nil
 }
 
-func (this *aioResultList) push(item *aioResult) {
-	var head *aioResult
+func (this *aioResultList) push(item *AIOResult) {
+	var head *AIOResult
 	if this.head == nil {
 		head = item
 	} else {
@@ -185,7 +176,7 @@ func (this *aioResultList) push(item *aioResult) {
 	this.head = item
 }
 
-func (this *aioResultList) pop() *aioResult {
+func (this *aioResultList) pop() *AIOResult {
 	if this.head == nil {
 		return nil
 	} else {
@@ -231,14 +222,14 @@ func (this *completetionQueue) postCompleteStatus(c *AIOConn, buff []byte, bytes
 
 		r := this.freeList.pop()
 		if nil == r {
-			r = &aioResult{}
+			r = &AIOResult{}
 		}
 
-		r.conn = c
-		r.context = context
-		r.err = err
-		r.buff = buff
-		r.bytestransfer = bytestransfer
+		r.Conn = c
+		r.Context = context
+		r.Err = err
+		r.Buff = buff
+		r.Bytestransfer = bytestransfer
 
 		this.completeQueue.push(r)
 
@@ -267,15 +258,10 @@ func (this *completetionQueue) getCompleteStatus() (res AIOResult, err error) {
 	}
 
 	e := this.completeQueue.pop()
-	res.Err = e.err
-	res.Conn = e.conn
-	res.Buff = e.buff
-	res.Context = e.context
-	res.Bytestransfer = e.bytestransfer
-
-	e.buff = nil
-	e.context = nil
-	e.conn = nil
+	res = *e
+	e.Buff = nil
+	e.Context = nil
+	e.Conn = nil
 
 	this.freeList.push(e)
 
