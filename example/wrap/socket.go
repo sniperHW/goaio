@@ -12,6 +12,83 @@ import (
 	"time"
 )
 
+var (
+	Error_TaskQueue_Closed = errors.New("task queue closed")
+)
+
+type taskQueue struct {
+	mu        sync.Mutex
+	cond      *sync.Cond
+	tail      *Socket
+	closed    bool
+	closeOnce sync.Once
+	waitCount int
+}
+
+func NewTaskQueue() *taskQueue {
+	q := &taskQueue{}
+	q.cond = sync.NewCond(&q.mu)
+	return q
+}
+
+func (this *taskQueue) close() {
+	this.closeOnce.Do(func() {
+		this.mu.Lock()
+		this.closed = true
+		this.mu.Unlock()
+		this.cond.Broadcast()
+	})
+}
+
+func (this *taskQueue) push(t *Socket) error {
+	this.mu.Lock()
+	if this.closed {
+		this.mu.Unlock()
+		return Error_TaskQueue_Closed
+	}
+
+	var head *Socket
+	if this.tail == nil {
+		head = t
+	} else {
+		head = this.tail.nnext
+		this.tail.nnext = t
+	}
+	t.nnext = head
+	this.tail = t
+
+	waitCount := this.waitCount
+	this.mu.Unlock()
+
+	if waitCount > 0 {
+		this.cond.Signal()
+	}
+
+	return nil
+}
+
+func (this *taskQueue) pop() (*Socket, error) {
+	this.mu.Lock()
+	for this.tail == nil {
+		if this.closed {
+			this.mu.Unlock()
+			return nil, Error_TaskQueue_Closed
+		} else {
+			this.waitCount++
+			this.cond.Wait()
+			this.waitCount--
+		}
+	}
+
+	head := this.tail.nnext
+	this.tail.nnext = nil
+	this.tail = nil
+
+	this.mu.Unlock()
+
+	return head, nil
+}
+
 type Message interface {
 	Bytes() []byte
 }
@@ -22,7 +99,7 @@ type EnCoder interface {
 
 type SocketSerice struct {
 	services          []*goaio.AIOService
-	outboundTaskQueue []chan func()
+	outboundTaskQueue []*taskQueue
 	shareBuffer       goaio.ShareBuffer
 }
 
@@ -42,7 +119,7 @@ func (this *SocketSerice) completeRoutine(s *goaio.AIOService) {
 	}
 }
 
-func (this *SocketSerice) Bind(conn net.Conn, ud interface{}) (*goaio.AIOConn, chan func(), error) {
+func (this *SocketSerice) Bind(conn net.Conn, ud interface{}) (*goaio.AIOConn, *taskQueue, error) {
 	idx := rand.Int() % len(this.services)
 	c, err := this.services[idx].Bind(conn, goaio.AIOConnOption{
 		SendqueSize: 1,
@@ -53,16 +130,25 @@ func (this *SocketSerice) Bind(conn net.Conn, ud interface{}) (*goaio.AIOConn, c
 	return c, this.outboundTaskQueue[idx], err
 }
 
-func (this *SocketSerice) outboundRoutine(q chan func()) {
-	for v := range q {
-		v()
+func (this *SocketSerice) outboundRoutine(tq *taskQueue) {
+	for {
+		head, err := tq.pop()
+		if nil != err {
+			return
+		} else {
+			for head != nil {
+				next := head.nnext
+				head.doSend()
+				head = next
+			}
+		}
 	}
 }
 
 func (this *SocketSerice) Close() {
 	for i, _ := range this.services {
 		this.services[i].Close()
-		close(this.outboundTaskQueue[i])
+		this.outboundTaskQueue[i].close()
 	}
 }
 
@@ -71,13 +157,13 @@ func NewSocketSerice(shareBuffer goaio.ShareBuffer) *SocketSerice {
 		shareBuffer: shareBuffer,
 	}
 
-	for i := 0; i < 4; i++ {
-		se := goaio.NewAIOService(1)
-		ch := make(chan func(), 1024)
+	for i := 0; i < 2; i++ {
+		se := goaio.NewAIOService(2)
+		tq := NewTaskQueue()
 		s.services = append(s.services, se)
-		s.outboundTaskQueue = append(s.outboundTaskQueue, ch)
+		s.outboundTaskQueue = append(s.outboundTaskQueue, tq)
 		go s.completeRoutine(se)
-		go s.outboundRoutine(ch)
+		go s.outboundRoutine(tq)
 	}
 
 	return s
@@ -111,7 +197,6 @@ func (this *defaultInBoundProcessor) Unpack() (interface{}, error) {
 }
 
 func (this *defaultInBoundProcessor) OnData(buff []byte) {
-	//fmt.Println("OnData", len(buff))
 	this.bytes = len(buff)
 }
 
@@ -125,7 +210,7 @@ const (
 )
 
 type Socket struct {
-	//service          *SocketSerice
+	nnext            *Socket
 	muW              sync.Mutex
 	sendQueue        *list.List
 	flag             int32
@@ -143,7 +228,7 @@ type Socket struct {
 	ioWait           sync.WaitGroup
 	sendOverChan     chan struct{}
 	netconn          net.Conn
-	ch               chan func()
+	tq               *taskQueue
 }
 
 func (s *Socket) setFlag(flag int32) {
@@ -264,16 +349,13 @@ func (s *Socket) onRecvComplete(r *goaio.AIOResult) {
 }
 
 func (s *Socket) emitSendTask() {
-	/*defer func() {
-		if r := recover(); r != nil {
-			s.ioWait.Done()
-			s.sendLock = false
-		}
-	}()*/
-
 	s.ioWait.Add(1)
-	s.ch <- s.doSend
-	s.sendLock = true
+	if nil == s.tq.push(s) {
+		s.sendLock = true
+	} else {
+		s.ioWait.Done()
+		s.sendLock = false
+	}
 }
 
 func (s *Socket) doSend() {
@@ -425,11 +507,11 @@ func (s *Socket) Close(reason error, delay time.Duration) {
 func NewSocket(service *SocketSerice, netConn net.Conn) *Socket {
 
 	s := &Socket{}
-	c, ch, err := service.Bind(netConn, s)
+	c, tq, err := service.Bind(netConn, s)
 	if err != nil {
 		return nil
 	}
-	s.ch = ch
+	s.tq = tq
 	s.aioConn = c
 	s.sendQueueSize = 256
 	s.sendQueue = list.New()
