@@ -524,8 +524,15 @@ func (this *AIOConn) doRead() {
 	ver := this.readableVer
 	this.Unlock()
 	var buff []byte
-	if nil != this.sharebuff {
-		buff = this.sharebuff.Acquire()
+	userShareBuffer := false
+	if len(c.buff) == 0 {
+		if nil != this.sharebuff {
+			buff = this.sharebuff.Acquire()
+			userShareBuffer = true
+		} else {
+			buff = make([]byte, 4096)
+			c.buff = buff
+		}
 	} else {
 		buff = c.buff
 	}
@@ -539,7 +546,7 @@ func (this *AIOConn) doRead() {
 			err = ErrEof
 		}
 
-		if nil != this.sharebuff {
+		if userShareBuffer {
 			this.sharebuff.Release(buff)
 			buff = nil
 		}
@@ -555,7 +562,7 @@ func (this *AIOConn) doRead() {
 			this.readable = false
 		}
 
-		if nil != this.sharebuff {
+		if userShareBuffer {
 			this.sharebuff.Release(buff)
 		}
 
