@@ -9,22 +9,23 @@ var (
 	Error_TaskQueue_Closed = errors.New("task queue closed")
 )
 
-type taskQueue struct {
+type TaskQueue struct {
 	mu        sync.Mutex
 	cond      *sync.Cond
-	tail      *AIOConn
 	closed    bool
 	closeOnce sync.Once
 	waitCount int
+	queue     []interface{}
 }
 
-func NewTaskQueue() *taskQueue {
-	q := &taskQueue{}
+func NewTaskQueue() *TaskQueue {
+	q := &TaskQueue{}
 	q.cond = sync.NewCond(&q.mu)
+	q.queue = make([]interface{}, 0, 512)
 	return q
 }
 
-func (this *taskQueue) close() {
+func (this *TaskQueue) Close() {
 	this.closeOnce.Do(func() {
 		this.mu.Lock()
 		this.closed = true
@@ -33,22 +34,14 @@ func (this *taskQueue) close() {
 	})
 }
 
-func (this *taskQueue) push(t *AIOConn) error {
+func (this *TaskQueue) Push(t interface{}) error {
 	this.mu.Lock()
 	if this.closed {
 		this.mu.Unlock()
 		return Error_TaskQueue_Closed
 	}
 
-	var head *AIOConn
-	if this.tail == nil {
-		head = t
-	} else {
-		head = this.tail.nnext
-		this.tail.nnext = t
-	}
-	t.nnext = head
-	this.tail = t
+	this.queue = append(this.queue, t)
 
 	waitCount := this.waitCount
 	this.mu.Unlock()
@@ -60,12 +53,13 @@ func (this *taskQueue) push(t *AIOConn) error {
 	return nil
 }
 
-func (this *taskQueue) pop() (*AIOConn, error) {
+func (this *TaskQueue) Pop(queue []interface{}) (out []interface{}, err error) {
 	this.mu.Lock()
-	for this.tail == nil {
+	for len(this.queue) == 0 {
 		if this.closed {
 			this.mu.Unlock()
-			return nil, Error_TaskQueue_Closed
+			err = Error_TaskQueue_Closed
+			return
 		} else {
 			this.waitCount++
 			this.cond.Wait()
@@ -73,11 +67,9 @@ func (this *taskQueue) pop() (*AIOConn, error) {
 		}
 	}
 
-	head := this.tail.nnext
-	this.tail.nnext = nil
-	this.tail = nil
+	out = this.queue
+	this.queue = queue[0:0]
 
 	this.mu.Unlock()
-
-	return head, nil
+	return
 }
