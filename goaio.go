@@ -334,6 +334,8 @@ func (this *AIOConn) processTimeout() {
 
 	if !deadline.IsZero() {
 		this.timer = newTimer(now.Sub(deadline), this.onTimeout)
+	} else {
+		this.timer = nil
 	}
 }
 
