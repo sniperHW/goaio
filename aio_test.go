@@ -81,6 +81,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 			} else {
 				if res.Err != nil {
 					res.Conn.Close(err)
+					//fmt.Println("client close")
 					atomic.AddInt32(&clientCount, -1)
 				} else if res.Context.(rune) == 'r' {
 					res.Conn.Send(res.Buff[:res.Bytestransfer], 'w')
@@ -102,7 +103,13 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				return
+				if ne, ok := err.(net.Error); ok && ne.Temporary() {
+					fmt.Printf("accept temp err: %v\n", ne)
+					continue
+				} else {
+					fmt.Println("break", err)
+					return
+				}
 			}
 
 			c, err := w.Bind(conn, AIOConnOption{})
@@ -113,6 +120,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 			}
 
 			atomic.AddInt32(&clientCount, 1)
+			//fmt.Println("new client")
 
 			//c.SetRecvTimeout(time.Second)
 
@@ -130,8 +138,8 @@ func TestDefault(t *testing.T) {
 	ln, serverDie := echoServer(t, 4096)
 
 	defer func() {
-		ln.Close()
 		<-serverDie
+		ln.Close()
 	}()
 
 	conn, err := net.Dial("tcp", ln.Addr().String())
@@ -241,8 +249,8 @@ func TestSendMutilBuff(t *testing.T) {
 	ln, serverDie := echoServer(t, 4096)
 
 	defer func() {
-		ln.Close()
 		<-serverDie
+		ln.Close()
 	}()
 
 	conn, err := net.Dial("tcp", ln.Addr().String())
@@ -326,8 +334,8 @@ func TestClose(t *testing.T) {
 	ln, serverDie := echoServer(t, 4096)
 
 	defer func() {
-		ln.Close()
 		<-serverDie
+		ln.Close()
 	}()
 
 	w := NewAIOService(1)
@@ -337,11 +345,15 @@ func TestClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	fmt.Println("connect ok")
+
 	c, err := w.Bind(conn, AIOConnOption{})
 
 	if nil != err {
 		t.Fatal(err)
 	}
+
+	c.Recv(make([]byte, 1024), 'r')
 
 	_, err = w.Bind(conn, AIOConnOption{})
 
@@ -353,15 +365,14 @@ func TestClose(t *testing.T) {
 
 	assert.Equal(t, ErrServiceClosed, err)
 
-	c.Close(ErrActiveClose)
 }
 
 func TestSendBigBuff(t *testing.T) {
 	ln, serverDie := echoServer(t, 128)
 
 	defer func() {
-		ln.Close()
 		<-serverDie
+		ln.Close()
 	}()
 
 	w := NewAIOService(1)
@@ -407,8 +418,8 @@ func TestShareBuffer(t *testing.T) {
 	ln, serverDie := echoServer(t, 4096)
 
 	defer func() {
-		ln.Close()
 		<-serverDie
+		ln.Close()
 	}()
 
 	w := NewAIOService(1)
@@ -1008,8 +1019,8 @@ func TestEchoTiny(t *testing.T) {
 	ln, serverDie := echoServer(t, 4096)
 
 	defer func() {
-		ln.Close()
 		<-serverDie
+		ln.Close()
 	}()
 
 	conn, err := net.Dial("tcp", ln.Addr().String())
@@ -1038,8 +1049,8 @@ func TestEchoHuge(t *testing.T) {
 	ln, serverDie := echoServer(t, 4096)
 
 	defer func() {
-		ln.Close()
 		<-serverDie
+		ln.Close()
 	}()
 
 	tx := make([]byte, 100*1024*1024)
@@ -1119,8 +1130,8 @@ func testParallel(t *testing.T, par int, msgsize int) {
 	ln, serverDie := echoServer(t, msgsize)
 	defer func() {
 		t.Log("wait server finish")
-		ln.Close()
 		<-serverDie
+		ln.Close()
 	}()
 
 	w := NewAIOService(1)
@@ -1242,8 +1253,8 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 
 	ln, serverDie := echoServer(b, bufsize)
 	defer func() {
-		ln.Close()
 		<-serverDie
+		ln.Close()
 	}()
 
 	w := NewAIOService(1)

@@ -663,7 +663,6 @@ type AIOService struct {
 type connMgr struct {
 	sync.Mutex
 	head   AIOConn
-	tail   AIOConn
 	closed bool
 }
 
@@ -677,7 +676,9 @@ func (this *connMgr) addIO(c *AIOConn) bool {
 			c.nnext = next
 			c.pprev = &this.head
 			this.head.nnext = c
-			next.pprev = c
+			if next != &this.head {
+				next.pprev = c
+			}
 		}
 		return true
 	} else {
@@ -703,13 +704,10 @@ func (this *connMgr) close() {
 	this.Lock()
 	conns := []*AIOConn{}
 	n := this.head.nnext
-	for ; n != &this.tail; n = n.nnext {
+	for ; n != &this.head; n = n.nnext {
 		conns = append(conns, n)
 	}
-
-	this.head.nnext = &this.tail
-	this.tail.pprev = &this.head
-
+	this.head.nnext = &this.head
 	this.Unlock()
 
 	for _, v := range conns {
@@ -723,13 +721,13 @@ func NewAIOService(worker int) *AIOService {
 		s := &AIOService{}
 		s.completeQueue = newCompletetionQueue()
 		s.poller = poller
-		s.connMgr = make([]*connMgr, 127)
+		s.connMgr = make([]*connMgr, 251)
 		s.waitgroup = waitgroup
 		s.closed = new(int32)
 		for k, _ := range s.connMgr {
 			m := &connMgr{}
-			m.head.nnext = &m.tail
-			m.tail.pprev = &m.head
+			m.head.nnext = &m.head
+			//m.tail.pprev = &m.head
 			s.connMgr[k] = m
 		}
 
