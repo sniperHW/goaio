@@ -2,6 +2,7 @@ package goaio
 
 import (
 	"errors"
+	"io"
 	"net"
 	"runtime"
 	"sync"
@@ -11,7 +12,6 @@ import (
 )
 
 var (
-	ErrEof                = errors.New("EOF")
 	ErrRecvTimeout        = errors.New("RecvTimeout")
 	ErrSendTimeout        = errors.New("SendTimetout")
 	ErrConnClosed         = errors.New("conn closed")
@@ -544,7 +544,7 @@ func (this *AIOConn) doRead() {
 		return
 	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
 		if size == 0 {
-			err = ErrEof
+			err = io.EOF
 		}
 
 		if userShareBuffer {
