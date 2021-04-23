@@ -70,6 +70,9 @@ type AIOConn struct {
 	userData      interface{}
 	doTimeout     *Timer
 	tqIdx         int
+	pprev         *AIOConn
+	nnext         *AIOConn
+	ioCount       int
 }
 
 type aioContext struct {
@@ -659,7 +662,8 @@ type AIOService struct {
 
 type connMgr struct {
 	sync.Mutex
-	conns  map[*AIOConn]int
+	head   AIOConn
+	tail   AIOConn
 	closed bool
 }
 
@@ -667,7 +671,14 @@ func (this *connMgr) addIO(c *AIOConn) bool {
 	this.Lock()
 	defer this.Unlock()
 	if !this.closed {
-		this.conns[c] = this.conns[c] + 1
+		c.ioCount++
+		if c.ioCount == 1 {
+			next := this.head.nnext
+			c.nnext = next
+			c.pprev = &this.head
+			this.head.nnext = c
+			next.pprev = c
+		}
 		return true
 	} else {
 		return false
@@ -677,20 +688,28 @@ func (this *connMgr) addIO(c *AIOConn) bool {
 func (this *connMgr) subIO(c *AIOConn) {
 	this.Lock()
 	defer this.Unlock()
-	count := this.conns[c] - 1
-	if count == 0 {
-		delete(this.conns, c)
-	} else {
-		this.conns[c] = count
+	c.ioCount--
+	if 0 == c.ioCount {
+		prev := c.pprev
+		next := c.nnext
+		prev.nnext = next
+		next.pprev = prev
+		c.pprev = nil
+		c.nnext = nil
 	}
 }
 
 func (this *connMgr) close() {
 	this.Lock()
 	conns := []*AIOConn{}
-	for v, _ := range this.conns {
-		conns = append(conns, v)
+	n := this.head.nnext
+	for ; n != &this.tail; n = n.nnext {
+		conns = append(conns, n)
 	}
+
+	this.head.nnext = &this.tail
+	this.tail.pprev = &this.head
+
 	this.Unlock()
 
 	for _, v := range conns {
@@ -708,9 +727,10 @@ func NewAIOService(worker int) *AIOService {
 		s.waitgroup = waitgroup
 		s.closed = new(int32)
 		for k, _ := range s.connMgr {
-			s.connMgr[k] = &connMgr{
-				conns: map[*AIOConn]int{},
-			}
+			m := &connMgr{}
+			m.head.nnext = &m.tail
+			m.tail.pprev = &m.head
+			s.connMgr[k] = m
 		}
 
 		if worker <= 0 {
