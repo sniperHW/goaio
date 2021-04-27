@@ -190,7 +190,7 @@ func (this *completetionQueue) grow() {
 	queue := make([]AIOResult, len(this.queue)*2-1, len(this.queue)*2-1)
 	i := 0
 	for !this.empty() {
-		queue[i] = *this.pop()
+		queue[i] = this.pop()
 		i++
 	}
 	this.queue = queue
@@ -198,16 +198,17 @@ func (this *completetionQueue) grow() {
 	this.tail = i
 }
 
-func (this *completetionQueue) pop() *AIOResult {
+func (this *completetionQueue) pop() AIOResult {
 	if this.head != this.tail {
 		head := this.queue[this.head]
 		this.queue[this.head].Conn = nil
 		this.queue[this.head].Buff = nil
 		this.queue[this.head].Context = nil
 		this.head = (this.head + 1) % len(this.queue)
-		return &head
+		return head
 	} else {
-		return nil
+		panic("empty")
+		return AIOResult{}
 	}
 }
 
@@ -245,7 +246,7 @@ func (this *completetionQueue) postCompleteStatus(c *AIOConn, buff []byte, bytes
 	}
 }
 
-func (this *completetionQueue) getCompleteStatus() (res *AIOResult, err error) {
+func (this *completetionQueue) getCompleteStatus() (res AIOResult, err error) {
 	this.mu.Lock()
 
 	for this.empty() {
@@ -835,7 +836,7 @@ func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfe
 	this.completeQueue.postCompleteStatus(c, buff, bytestransfer, err, context)
 }
 
-func (this *AIOService) GetCompleteStatus() (*AIOResult, error) {
+func (this *AIOService) GetCompleteStatus() (AIOResult, error) {
 	return this.completeQueue.getCompleteStatus()
 }
 
@@ -872,7 +873,7 @@ func Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
 	return defalutService.Bind(conn, option)
 }
 
-func GetCompleteStatus() (*AIOResult, error) {
+func GetCompleteStatus() (AIOResult, error) {
 	createOnce.Do(func() {
 		defalutService = NewAIOService(DefaultWorkerCount)
 	})
