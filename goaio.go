@@ -150,7 +150,6 @@ func (this *aioContextQueue) setDeadline(deadline time.Time) bool {
 }
 
 type AIOResult struct {
-	ppnext        *AIOResult
 	Conn          *AIOConn
 	Buff          []byte
 	Context       interface{}
@@ -158,53 +157,20 @@ type AIOResult struct {
 	Bytestransfer int
 }
 
-type aioResultList struct {
-	head *AIOResult
-}
-
-func (this *aioResultList) empty() bool {
-	return this.head == nil
-}
-
-func (this *aioResultList) push(item *AIOResult) {
-	var head *AIOResult
-	if this.head == nil {
-		head = item
-	} else {
-		head = this.head.ppnext
-		this.head.ppnext = item
-	}
-	item.ppnext = head
-	this.head = item
-}
-
-func (this *aioResultList) pop() *AIOResult {
-	if this.head == nil {
-		return nil
-	} else {
-		item := this.head.ppnext
-		if item == this.head {
-			this.head = nil
-		} else {
-			this.head.ppnext = item.ppnext
-		}
-
-		item.ppnext = nil
-		return item
-	}
-}
-
 type completetionQueue struct {
-	mu            sync.Mutex
-	cond          *sync.Cond
-	completeQueue aioResultList
-	freeList      aioResultList
-	closed        bool
-	waitCount     int
+	mu        sync.Mutex
+	cond      *sync.Cond
+	head      int
+	tail      int
+	queue     []AIOResult
+	closed    bool
+	waitCount int
 }
 
 func newCompletetionQueue() *completetionQueue {
-	q := &completetionQueue{}
+	q := &completetionQueue{
+		queue: make([]AIOResult, 1024+1),
+	}
 	q.cond = sync.NewCond(&q.mu)
 	return q
 }
@@ -216,24 +182,58 @@ func (this *completetionQueue) close() {
 	this.cond.Broadcast()
 }
 
+func (this *completetionQueue) empty() bool {
+	return this.head == this.tail
+}
+
+func (this *completetionQueue) grow() {
+	queue := make([]AIOResult, len(this.queue)*2-1, len(this.queue)*2-1)
+	i := 0
+	for !this.empty() {
+		queue[i] = *this.pop()
+		i++
+	}
+	this.queue = queue
+	this.head = 0
+	this.tail = i
+}
+
+func (this *completetionQueue) pop() *AIOResult {
+	if this.head != this.tail {
+		head := this.queue[this.head]
+		this.queue[this.head].Conn = nil
+		this.queue[this.head].Buff = nil
+		this.queue[this.head].Context = nil
+		this.head = (this.head + 1) % len(this.queue)
+		return &head
+	} else {
+		return nil
+	}
+}
+
+func (this *completetionQueue) push(r *AIOResult) bool {
+	if (this.tail+1)%len(this.queue) != this.head {
+		this.queue[this.tail] = *r
+		this.tail = (this.tail + 1) % len(this.queue)
+		return true
+	} else {
+		this.grow()
+		return this.push(r)
+	}
+}
+
 func (this *completetionQueue) postCompleteStatus(c *AIOConn, buff []byte, bytestransfer int, err error, context interface{}) {
 	this.mu.Lock()
 	if this.closed {
 		this.mu.Unlock()
 	} else {
-
-		r := this.freeList.pop()
-		if nil == r {
-			r = &AIOResult{}
-		}
-
-		r.Conn = c
-		r.Context = context
-		r.Err = err
-		r.Buff = buff
-		r.Bytestransfer = bytestransfer
-
-		this.completeQueue.push(r)
+		this.push(&AIOResult{
+			Conn:          c,
+			Context:       context,
+			Err:           err,
+			Buff:          buff,
+			Bytestransfer: bytestransfer,
+		})
 
 		waitCount := this.waitCount
 
@@ -245,10 +245,10 @@ func (this *completetionQueue) postCompleteStatus(c *AIOConn, buff []byte, bytes
 	}
 }
 
-func (this *completetionQueue) getCompleteStatus() (res AIOResult, err error) {
+func (this *completetionQueue) getCompleteStatus() (res *AIOResult, err error) {
 	this.mu.Lock()
 
-	for this.completeQueue.empty() {
+	for this.empty() {
 		if this.closed {
 			err = ErrServiceClosed
 			this.mu.Unlock()
@@ -259,16 +259,8 @@ func (this *completetionQueue) getCompleteStatus() (res AIOResult, err error) {
 		this.waitCount--
 	}
 
-	e := this.completeQueue.pop()
-	res = *e
-	e.Buff = nil
-	e.Context = nil
-	e.Conn = nil
-
-	this.freeList.push(e)
-
+	res = this.pop()
 	this.mu.Unlock()
-
 	return
 }
 
@@ -843,7 +835,7 @@ func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfe
 	this.completeQueue.postCompleteStatus(c, buff, bytestransfer, err, context)
 }
 
-func (this *AIOService) GetCompleteStatus() (AIOResult, error) {
+func (this *AIOService) GetCompleteStatus() (*AIOResult, error) {
 	return this.completeQueue.getCompleteStatus()
 }
 
@@ -880,7 +872,7 @@ func Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
 	return defalutService.Bind(conn, option)
 }
 
-func GetCompleteStatus() (AIOResult, error) {
+func GetCompleteStatus() (*AIOResult, error) {
 	createOnce.Do(func() {
 		defalutService = NewAIOService(DefaultWorkerCount)
 	})
