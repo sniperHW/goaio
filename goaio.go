@@ -64,11 +64,11 @@ type AIOConn struct {
 	closeOnce     sync.Once
 	sendTimeout   time.Duration
 	recvTimeout   time.Duration
-	timer         *Timer
+	timer         *time.Timer //*Timer
 	reason        error
 	sharebuff     ShareBuffer
 	userData      interface{}
-	doTimeout     *Timer
+	doTimeout     *time.Timer //*Timer
 	tqIdx         int
 	pprev         *AIOConn
 	nnext         *AIOConn
@@ -102,7 +102,6 @@ func (this *aioContextQueue) empty() bool {
 }
 
 func (this *aioContextQueue) add(c aioContext) error {
-
 	if (this.tail+1)%len(this.queue) == this.head {
 		return ErrBusy
 	} else {
@@ -199,17 +198,15 @@ func (this *completetionQueue) grow() {
 }
 
 func (this *completetionQueue) pop() AIOResult {
-	if this.head != this.tail {
-		head := this.queue[this.head]
-		this.queue[this.head].Conn = nil
-		this.queue[this.head].Buff = nil
-		this.queue[this.head].Context = nil
-		this.head = (this.head + 1) % len(this.queue)
-		return head
-	} else {
+	if this.head == this.tail {
 		panic("empty")
-		return AIOResult{}
 	}
+	head := this.queue[this.head]
+	this.queue[this.head].Conn = nil
+	this.queue[this.head].Buff = nil
+	this.queue[this.head].Context = nil
+	this.head = (this.head + 1) % len(this.queue)
+	return head
 }
 
 func (this *completetionQueue) push(r *AIOResult) bool {
@@ -281,7 +278,7 @@ func (this *AIOConn) Close(reason error) {
 		this.reason = reason
 
 		if nil != this.timer {
-			this.timer.Cancel()
+			this.timer.Stop()
 			this.timer = nil
 		}
 		if !this.doing {
@@ -329,21 +326,19 @@ func (this *AIOConn) processTimeout() {
 	}
 
 	if !deadline.IsZero() {
-		this.timer = newTimer(now.Sub(deadline), this.onTimeout)
+		this.timer = time.AfterFunc(now.Sub(deadline), this.onTimeout)
 	} else {
 		this.timer = nil
 	}
 }
 
-func (this *AIOConn) onTimeout(t *Timer) {
+func (this *AIOConn) onTimeout() {
 	this.Lock()
 	defer this.Unlock()
-	if this.timer == t {
-		this.doTimeout = this.timer
-		if !this.doing {
-			this.doing = true
-			this.service.pushIOTask(this)
-		}
+	this.doTimeout = this.timer
+	if nil != this.doTimeout && !this.doing {
+		this.doing = true
+		this.service.pushIOTask(this)
 	}
 }
 
@@ -352,14 +347,14 @@ func (this *AIOConn) SetRecvTimeout(timeout time.Duration) {
 	defer this.Unlock()
 	if !this.closed {
 		if nil != this.timer {
-			this.timer.Cancel()
+			this.timer.Stop()
 			this.timer = nil
 		}
 		this.recvTimeout = timeout
 		if timeout != 0 {
 			deadline := time.Now().Add(timeout)
 			if this.r.setDeadline(deadline) {
-				this.timer = newTimer(timeout, this.onTimeout)
+				this.timer = time.AfterFunc(timeout, this.onTimeout) //newTimer(timeout, this.onTimeout)
 			}
 		} else {
 			this.r.setDeadline(time.Time{})
@@ -371,18 +366,18 @@ func (this *AIOConn) SetSendTimeout(timeout time.Duration) {
 	this.Lock()
 	defer this.Unlock()
 	if !this.closed {
+		if nil != this.timer {
+			this.timer.Stop()
+			this.timer = nil
+		}
 		this.sendTimeout = timeout
 		if timeout != 0 {
 			deadline := time.Now().Add(timeout)
 			if this.w.setDeadline(deadline) {
-				this.timer = newTimer(timeout, this.onTimeout)
+				this.timer = time.AfterFunc(timeout, this.onTimeout) //newTimer(timeout, this.onTimeout)
 			}
 		} else {
 			this.w.setDeadline(time.Time{})
-			if nil != this.timer {
-				this.timer.Cancel()
-				this.timer = nil
-			}
 		}
 	}
 }
@@ -437,7 +432,7 @@ func (this *AIOConn) Send(buff []byte, context interface{}) error {
 		}
 
 		if !deadline.IsZero() && nil == this.timer {
-			this.timer = newTimer(timeout, this.onTimeout)
+			this.timer = time.AfterFunc(timeout, this.onTimeout) //newTimer(timeout, this.onTimeout)
 		}
 
 		if this.writeable && !this.doing {
@@ -483,7 +478,7 @@ func (this *AIOConn) Recv(buff []byte, context interface{}) error {
 		}
 
 		if !deadline.IsZero() && nil == this.timer {
-			this.timer = newTimer(timeout, this.onTimeout)
+			this.timer = time.AfterFunc(timeout, this.onTimeout) //newTimer(timeout, this.onTimeout)
 		}
 
 		if this.readable && !this.doing {
@@ -620,7 +615,7 @@ func (this *AIOConn) Do() {
 			return
 		} else {
 
-			if nil != this.timer && this.timer == this.doTimeout {
+			if nil != this.doTimeout && this.timer == this.doTimeout {
 				this.doTimeout = nil
 				this.processTimeout()
 			}
@@ -720,7 +715,6 @@ func NewAIOService(worker int) *AIOService {
 		for k, _ := range s.connMgr {
 			m := &connMgr{}
 			m.head.nnext = &m.head
-			//m.tail.pprev = &m.head
 			s.connMgr[k] = m
 		}
 

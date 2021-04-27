@@ -7,7 +7,6 @@ package goaio
 import (
 	"bytes"
 	"crypto/rand"
-	//"encoding/binary"
 	"fmt"
 	"github.com/stretchr/testify/assert"
 	"io"
@@ -710,9 +709,7 @@ func TestRecvTimeout2(t *testing.T) {
 		close(die)
 	}()
 
-	newTimer(time.Second*2, func(*Timer) {
-		w.Close()
-	})
+	time.AfterFunc(time.Second*2, w.Close)
 
 	<-die
 
@@ -784,7 +781,7 @@ func TestRecvTimeout3(t *testing.T) {
 		close(die)
 	}()
 
-	newTimer(time.Second*2, func(*Timer) {
+	time.AfterFunc(time.Second*2, func() {
 		assert.Equal(t, c.Recv(rx, 'r'), ErrConnClosed)
 		assert.Equal(t, c.Send(rx, 'r'), ErrConnClosed)
 		w.Close()
@@ -932,9 +929,7 @@ func TestSendTimeout2(t *testing.T) {
 		close(die)
 	}()
 
-	newTimer(time.Second*2, func(*Timer) {
-		w.Close()
-	})
+	time.AfterFunc(time.Second*2, w.Close)
 
 	<-die
 
