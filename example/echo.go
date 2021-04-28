@@ -35,12 +35,16 @@ func main() {
 			} else if nil != res.Err {
 				res.Conn.Close(res.Err)
 			} else if res.Context.(rune) == 'r' {
+				fmt.Println("on recv")
 				res.Conn.Send(res.Buff[:res.Bytestransfer], 'w')
 			} else {
+				fmt.Println("on send")
 				res.Conn.Recv(res.Buff[:cap(res.Buff)], 'r')
 			}
 		}
 	}()
+
+	fmt.Println("server start at localhost:8110")
 
 	for {
 		conn, err := ln.Accept()

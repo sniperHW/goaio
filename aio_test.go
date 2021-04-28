@@ -218,6 +218,7 @@ func TestBusySend(t *testing.T) {
 			if nil != err {
 				break
 			} else if nil != res.Err {
+				fmt.Println("send ok")
 				break
 			}
 		}
@@ -236,6 +237,7 @@ func TestBusySend(t *testing.T) {
 
 	go func() {
 		time.Sleep(time.Second * 2)
+		fmt.Println("close")
 		c.Close(ErrActiveClose)
 	}()
 
