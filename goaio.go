@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unsafe"
 )
 
 var (
@@ -46,38 +45,6 @@ type AIOConnOption struct {
 	RecvqueSize int
 	ShareBuff   ShareBuffer
 	UserData    interface{}
-}
-
-const MaxSendSize = 1024 * 256
-const MaxSendIovecSize = 64
-
-type AIOConn struct {
-	sync.Mutex
-	fd            int
-	rawconn       net.Conn
-	readable      bool
-	readableVer   int
-	writeable     bool
-	writeableVer  int
-	w             *aioContextQueue
-	r             *aioContextQueue
-	service       *AIOService
-	doing         bool
-	closed        bool
-	pollerVersion int32
-	closeOnce     sync.Once
-	sendTimeout   time.Duration
-	recvTimeout   time.Duration
-	timer         *time.Timer //*Timer
-	reason        error
-	sharebuff     ShareBuffer
-	userData      interface{}
-	doTimeout     *time.Timer //*Timer
-	tqIdx         int
-	pprev         *AIOConn
-	nnext         *AIOConn
-	ioCount       int
-	send_iovec    [MaxSendIovecSize]syscall.Iovec
 }
 
 type aioContext struct {
@@ -150,27 +117,6 @@ func (this *aioContextQueue) setDeadline(deadline time.Time) bool {
 			i = (i + 1) % len(this.queue)
 		}
 		return true
-	}
-}
-
-func (this *aioContextQueue) packIovec(iovec *[MaxSendIovecSize]syscall.Iovec) (int, int) {
-	if this.empty() {
-		return 0, 0
-	} else {
-		cc := 0
-		total := 0
-		for i := this.head; ; {
-			b := &this.queue[i]
-			size := len(b.buff) - b.offset
-			(*iovec)[cc] = syscall.Iovec{&b.buff[b.offset], uint64(size)}
-			total += size
-			cc++
-			i = (i + 1) % len(this.queue)
-			if i == this.tail || total >= MaxSendSize || cc >= len(*iovec) {
-				break
-			}
-		}
-		return cc, total
 	}
 }
 
@@ -286,6 +232,34 @@ func (this *completetionQueue) getCompleteStatus() (res AIOResult, err error) {
 	res = this.pop()
 	this.mu.Unlock()
 	return
+}
+
+type aioConn struct {
+	sync.Mutex
+	fd            int
+	rawconn       net.Conn
+	readable      bool
+	readableVer   int
+	writeable     bool
+	writeableVer  int
+	w             *aioContextQueue
+	r             *aioContextQueue
+	service       *AIOService
+	doing         bool
+	closed        bool
+	pollerVersion int32
+	closeOnce     sync.Once
+	sendTimeout   time.Duration
+	recvTimeout   time.Duration
+	timer         *time.Timer
+	reason        error
+	sharebuff     ShareBuffer
+	userData      interface{}
+	doTimeout     *time.Timer
+	tqIdx         int
+	pprev         *AIOConn
+	nnext         *AIOConn
+	ioCount       int
 }
 
 func (this *AIOConn) GetUserData() interface{} {
@@ -590,63 +564,6 @@ func (this *AIOConn) doRead() {
 	}
 }
 
-func (this *AIOConn) doWrite() {
-	ver := this.writeableVer
-	cc, total := this.w.packIovec(&this.send_iovec)
-	this.Unlock()
-	var (
-		r uintptr
-		e syscall.Errno
-	)
-
-	r, _, e = syscall.Syscall(syscall.SYS_WRITEV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.send_iovec[0])), uintptr(cc))
-	size := int(r)
-	this.Lock()
-
-	if e == syscall.EINTR {
-		return
-	} else if (size == 0 && total > 0) || (e != 0 && e != syscall.EAGAIN) {
-
-		var err error
-		if size == 0 {
-			err = io.ErrUnexpectedEOF
-		} else {
-			err = e
-		}
-
-		for !this.w.empty() {
-			c := this.w.front()
-			this.service.postCompleteStatus(this, c.buff, c.offset, err, c.context)
-			this.w.popFront()
-		}
-	} else if e == syscall.EAGAIN {
-		if ver == this.writeableVer {
-			this.writeable = false
-			this.service.poller.enableWrite(this)
-		}
-	} else {
-		remain := size
-		for remain > 0 {
-			c := this.w.front()
-			if remain >= len(c.buff[c.offset:]) {
-				this.service.postCompleteStatus(this, c.buff, len(c.buff), nil, c.context)
-				remain -= len(c.buff[c.offset:])
-				this.w.popFront()
-			} else {
-				c.offset += remain
-				remain = 0
-			}
-		}
-
-		if size < total {
-			if ver == this.writeableVer {
-				this.writeable = false
-				this.service.poller.enableWrite(this)
-			}
-		}
-	}
-}
-
 func (this *AIOConn) Do() {
 	this.Lock()
 	defer this.Unlock()
@@ -852,15 +769,17 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 	syscall.SetNonblock(fd, true)
 
 	cc := &AIOConn{
-		fd:        fd,
-		rawconn:   conn,
-		service:   this,
-		sharebuff: option.ShareBuff,
-		r:         newAioContextQueue(option.RecvqueSize),
-		w:         newAioContextQueue(option.SendqueSize),
-		userData:  option.UserData,
-		//todo:根据各tq的负载情况动态调整tqIdx以平衡worker线程的工作负载
-		tqIdx: fd % len(this.tq),
+		aioConn: aioConn{
+			fd:        fd,
+			rawconn:   conn,
+			service:   this,
+			sharebuff: option.ShareBuff,
+			r:         newAioContextQueue(option.RecvqueSize),
+			w:         newAioContextQueue(option.SendqueSize),
+			userData:  option.UserData,
+			//todo:根据各tq的负载情况动态调整tqIdx以平衡worker线程的工作负载
+			tqIdx: fd % len(this.tq),
+		},
 	}
 
 	if this.poller.watch(cc) {

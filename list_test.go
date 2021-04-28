@@ -13,7 +13,9 @@ func TestList(t *testing.T) {
 	l.head.nnext = &l.head
 
 	c1 := &AIOConn{
-		fd: 1,
+		aioConn: aioConn{
+			fd: 1,
+		},
 	}
 
 	assert.Equal(t, true, l.addIO(c1))
@@ -23,7 +25,9 @@ func TestList(t *testing.T) {
 	assert.Equal(t, c1.pprev, &l.head)
 
 	c2 := &AIOConn{
-		fd: 2,
+		aioConn: aioConn{
+			fd: 2,
+		},
 	}
 
 	assert.Equal(t, true, l.addIO(c2))
@@ -36,7 +40,9 @@ func TestList(t *testing.T) {
 	assert.Equal(t, 2, c2.ioCount)
 
 	c3 := &AIOConn{
-		fd: 3,
+		aioConn: aioConn{
+			fd: 3,
+		},
 	}
 
 	assert.Equal(t, true, l.addIO(c3))
