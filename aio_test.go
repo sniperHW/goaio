@@ -106,7 +106,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 					fmt.Printf("accept temp err: %v\n", ne)
 					continue
 				} else {
-					fmt.Println("break", err)
+					//fmt.Println("break", err)
 					return
 				}
 			}
@@ -210,6 +210,9 @@ func TestBusySend(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	var sendCount int32
+	var sendBreak int32
+
 	die := make(chan struct{})
 
 	go func() {
@@ -218,8 +221,11 @@ func TestBusySend(t *testing.T) {
 			if nil != err {
 				break
 			} else if nil != res.Err {
-				fmt.Println("send ok")
 				break
+			} else {
+				if 0 == atomic.AddInt32(&sendCount, -1) && atomic.LoadInt32(&sendBreak) == 1 {
+					break
+				}
 			}
 		}
 		close(die)
@@ -228,17 +234,19 @@ func TestBusySend(t *testing.T) {
 	go func() {
 		for {
 			if err := c.Send([]byte("string"), 'w'); nil != err {
-				if err == ErrActiveClose {
+				if err == ErrConnClosed {
+					atomic.AddInt32(&sendBreak, 1)
 					break
 				}
+			} else {
+				atomic.AddInt32(&sendCount, 1)
 			}
 		}
 	}()
 
 	go func() {
 		time.Sleep(time.Second * 2)
-		fmt.Println("close")
-		c.Close(ErrActiveClose)
+		c.Close(nil)
 	}()
 
 	<-die
