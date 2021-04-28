@@ -106,7 +106,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 					fmt.Printf("accept temp err: %v\n", ne)
 					continue
 				} else {
-					fmt.Println("break", err)
+					//fmt.Println("break", err)
 					return
 				}
 			}
