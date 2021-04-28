@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 var (
@@ -117,6 +118,27 @@ func (this *aioContextQueue) setDeadline(deadline time.Time) bool {
 			i = (i + 1) % len(this.queue)
 		}
 		return true
+	}
+}
+
+func (this *aioContextQueue) packIovec(iovec *[MaxSendIovecSize]syscall.Iovec) (int, int) {
+	if this.empty() {
+		return 0, 0
+	} else {
+		cc := 0
+		total := 0
+		for i := this.head; ; {
+			b := &this.queue[i]
+			size := len(b.buff) - b.offset
+			(*iovec)[cc] = syscall.Iovec{&b.buff[b.offset], uint64(size)}
+			total += size
+			cc++
+			i = (i + 1) % len(this.queue)
+			if i == this.tail || total >= MaxSendSize || cc >= len(*iovec) {
+				break
+			}
+		}
+		return cc, total
 	}
 }
 
@@ -234,7 +256,10 @@ func (this *completetionQueue) getCompleteStatus() (res AIOResult, err error) {
 	return
 }
 
-type aioConn struct {
+const MaxSendSize = 1024 * 256
+const MaxSendIovecSize = 64
+
+type AIOConn struct {
 	sync.Mutex
 	fd            int
 	rawconn       net.Conn
@@ -260,6 +285,7 @@ type aioConn struct {
 	pprev         *AIOConn
 	nnext         *AIOConn
 	ioCount       int
+	send_iovec    [MaxSendIovecSize]syscall.Iovec
 }
 
 func (this *AIOConn) GetUserData() interface{} {
@@ -396,58 +422,6 @@ func (this *AIOConn) canRead() bool {
 
 func (this *AIOConn) canWrite() bool {
 	return this.writeable && !this.w.empty()
-}
-
-func (this *AIOConn) SendObject(o interface{}, encode func(interface{}) ([]byte, error), context interface{}) error {
-	if atomic.LoadInt32(this.service.closed) == 1 {
-		return ErrServiceClosed
-	}
-
-	this.Lock()
-	defer this.Unlock()
-
-	if this.closed {
-		return ErrConnClosed
-	} else {
-
-		var deadline time.Time
-
-		timeout := this.getSendTimeout()
-
-		if 0 != timeout {
-			deadline = time.Now().Add(timeout)
-		}
-
-		if this.w.empty() {
-			if buff, err := encode(o); nil != err {
-				return err
-			} else {
-				this.w.add(aioContext{
-					buff:     buff,
-					context:  context,
-					deadline: deadline,
-				})
-			}
-		} else {
-			return ErrBusy
-		}
-
-		if !this.service.addIO(this) {
-			this.w.dropLast()
-			return ErrServiceClosed
-		}
-
-		if !deadline.IsZero() && nil == this.timer {
-			this.timer = time.AfterFunc(timeout, this.onTimeout)
-		}
-
-		if this.writeable && !this.doing {
-			this.doing = true
-			this.service.pushIOTask(this)
-		}
-
-		return nil
-	}
 }
 
 func (this *AIOConn) Send(buff []byte, context interface{}) error {
@@ -613,6 +587,63 @@ func (this *AIOConn) doRead() {
 	} else {
 		this.service.postCompleteStatus(this, buff, size, nil, c.context)
 		this.r.popFront()
+	}
+}
+
+func (this *AIOConn) doWrite() {
+	ver := this.writeableVer
+	cc, total := this.w.packIovec(&this.send_iovec)
+	this.Unlock()
+	var (
+		r uintptr
+		e syscall.Errno
+	)
+
+	r, _, e = syscall.Syscall(syscall.SYS_WRITEV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.send_iovec[0])), uintptr(cc))
+	size := int(r)
+	this.Lock()
+
+	if e == syscall.EINTR {
+		return
+	} else if (size == 0 && total > 0) || (e != 0 && e != syscall.EAGAIN) {
+
+		var err error
+		if size == 0 {
+			err = io.ErrUnexpectedEOF
+		} else {
+			err = e
+		}
+
+		for !this.w.empty() {
+			c := this.w.front()
+			this.service.postCompleteStatus(this, c.buff, c.offset, err, c.context)
+			this.w.popFront()
+		}
+	} else if e == syscall.EAGAIN {
+		if ver == this.writeableVer {
+			this.writeable = false
+			this.service.poller.enableWrite(this)
+		}
+	} else {
+		remain := size
+		for remain > 0 {
+			c := this.w.front()
+			if remain >= len(c.buff[c.offset:]) {
+				this.service.postCompleteStatus(this, c.buff, len(c.buff), nil, c.context)
+				remain -= len(c.buff[c.offset:])
+				this.w.popFront()
+			} else {
+				c.offset += remain
+				remain = 0
+			}
+		}
+
+		if size < total {
+			if ver == this.writeableVer {
+				this.writeable = false
+				this.service.poller.enableWrite(this)
+			}
+		}
 	}
 }
 
@@ -821,17 +852,15 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 	syscall.SetNonblock(fd, true)
 
 	cc := &AIOConn{
-		aioConn: aioConn{
-			fd:        fd,
-			rawconn:   conn,
-			service:   this,
-			sharebuff: option.ShareBuff,
-			r:         newAioContextQueue(option.RecvqueSize),
-			w:         newAioContextQueue(option.SendqueSize),
-			userData:  option.UserData,
-			//todo:根据各tq的负载情况动态调整tqIdx以平衡worker线程的工作负载
-			tqIdx: fd % len(this.tq),
-		},
+		fd:        fd,
+		rawconn:   conn,
+		service:   this,
+		sharebuff: option.ShareBuff,
+		r:         newAioContextQueue(option.RecvqueSize),
+		w:         newAioContextQueue(option.SendqueSize),
+		userData:  option.UserData,
+		//todo:根据各tq的负载情况动态调整tqIdx以平衡worker线程的工作负载
+		tqIdx: fd % len(this.tq),
 	}
 
 	if this.poller.watch(cc) {
