@@ -398,6 +398,58 @@ func (this *AIOConn) canWrite() bool {
 	return this.writeable && !this.w.empty()
 }
 
+func (this *AIOConn) SendObject(o interface{}, encode func(interface{}) ([]byte, error), context interface{}) error {
+	if atomic.LoadInt32(this.service.closed) == 1 {
+		return ErrServiceClosed
+	}
+
+	this.Lock()
+	defer this.Unlock()
+
+	if this.closed {
+		return ErrConnClosed
+	} else {
+
+		var deadline time.Time
+
+		timeout := this.getSendTimeout()
+
+		if 0 != timeout {
+			deadline = time.Now().Add(timeout)
+		}
+
+		if this.w.empty() {
+			if buff, err := encode(o); nil != err {
+				return err
+			} else {
+				this.w.add(aioContext{
+					buff:     buff,
+					context:  context,
+					deadline: deadline,
+				})
+			}
+		} else {
+			return ErrBusy
+		}
+
+		if !this.service.addIO(this) {
+			this.w.dropLast()
+			return ErrServiceClosed
+		}
+
+		if !deadline.IsZero() && nil == this.timer {
+			this.timer = time.AfterFunc(timeout, this.onTimeout)
+		}
+
+		if this.writeable && !this.doing {
+			this.doing = true
+			this.service.pushIOTask(this)
+		}
+
+		return nil
+	}
+}
+
 func (this *AIOConn) Send(buff []byte, context interface{}) error {
 	if atomic.LoadInt32(this.service.closed) == 1 {
 		return ErrServiceClosed
@@ -432,7 +484,7 @@ func (this *AIOConn) Send(buff []byte, context interface{}) error {
 		}
 
 		if !deadline.IsZero() && nil == this.timer {
-			this.timer = time.AfterFunc(timeout, this.onTimeout) //newTimer(timeout, this.onTimeout)
+			this.timer = time.AfterFunc(timeout, this.onTimeout)
 		}
 
 		if this.writeable && !this.doing {
@@ -478,7 +530,7 @@ func (this *AIOConn) Recv(buff []byte, context interface{}) error {
 		}
 
 		if !deadline.IsZero() && nil == this.timer {
-			this.timer = time.AfterFunc(timeout, this.onTimeout) //newTimer(timeout, this.onTimeout)
+			this.timer = time.AfterFunc(timeout, this.onTimeout)
 		}
 
 		if this.readable && !this.doing {
