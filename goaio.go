@@ -570,6 +570,11 @@ func (this *AIOConn) doWrite() {
 	ver := this.writeableVer
 	size, err := syscall.Write(this.fd, c.buff[c.offset:])
 	this.Lock()
+
+	if size == 0 && len(c.buff[c.offset:]) > 0 {
+		err = io.ErrUnexpectedEOF
+	}
+
 	if err == syscall.EINTR {
 		return
 	} else if err != nil && err != syscall.EAGAIN {
