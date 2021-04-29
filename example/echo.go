@@ -11,10 +11,6 @@ import (
 	"time"
 )
 
-var clientcount int32
-var bytescount int32
-var packetcount int32
-
 func main() {
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:8110")
@@ -33,13 +29,14 @@ func main() {
 			if nil != err {
 				return
 			} else if nil != res.Err {
+				fmt.Println("go error", res.Err)
 				res.Conn.Close(res.Err)
 			} else if res.Context.(rune) == 'r' {
 				fmt.Println("on recv")
-				res.Conn.Send(res.Buff[:res.Bytestransfer], 'w')
+				res.Conn.Send('w', res.Buffs[0][:res.Bytestransfer])
 			} else {
 				fmt.Println("on send")
-				res.Conn.Recv(res.Buff[:cap(res.Buff)], 'r')
+				res.Conn.Recv('r', res.Buffs[0][:cap(res.Buffs[0])])
 			}
 		}
 	}()
@@ -53,13 +50,13 @@ func main() {
 			return
 		}
 
+		fmt.Println("new client")
+
 		c, _ := goaio.Bind(conn, goaio.AIOConnOption{})
 
 		c.SetRecvTimeout(time.Second * 5)
 
-		buff := make([]byte, 1024*4)
-
-		c.Recv(buff, 'r')
+		c.Recv('r', make([]byte, 1024*4))
 
 	}
 
