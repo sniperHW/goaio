@@ -52,11 +52,12 @@ type AIOConnOption struct {
 }
 
 type aioContext struct {
-	buffs    [][]byte
-	index    int //buffs索引
-	offset   int //[]byte内下标
-	context  interface{}
-	deadline time.Time
+	buffs      [][]byte
+	index      int //buffs索引
+	offset     int //[]byte内下标
+	transfered int //已经传输的字节数
+	context    interface{}
+	deadline   time.Time
 }
 
 type aioContextQueue struct {
@@ -353,7 +354,7 @@ func (this *AIOConn) processTimeout() {
 		for !this.w.empty() {
 			f := this.w.front()
 			if now.After(f.deadline) {
-				this.service.postCompleteStatus(this, f.buffs, f.offset, ErrSendTimeout, f.context)
+				this.service.postCompleteStatus(this, f.buffs, f.transfered, ErrSendTimeout, f.context)
 				this.w.popFront()
 			} else {
 				break
@@ -565,7 +566,7 @@ func (this *AIOConn) doRead() {
 	var cc int
 	if len(c.buffs) == 0 {
 		if nil != this.sharebuff {
-			sharebuff := this.sharebuff.Acquire()
+			sharebuff = this.sharebuff.Acquire()
 			this.recv_iovec[0] = syscall.Iovec{&sharebuff[0], uint64(len(sharebuff))}
 			userShareBuffer = true
 			cc = 1
@@ -575,7 +576,7 @@ func (this *AIOConn) doRead() {
 	}
 
 	if !userShareBuffer {
-		cc, _ = this.w.packIovec(&this.recv_iovec)
+		cc, _ = this.r.packIovec(&this.recv_iovec)
 	}
 
 	var (
@@ -618,6 +619,11 @@ func (this *AIOConn) doRead() {
 		}
 
 	} else {
+
+		if userShareBuffer {
+			c.buffs = append(c.buffs, sharebuff)
+		}
+
 		this.service.postCompleteStatus(this, c.buffs, size, nil, c.context)
 		this.r.popFront()
 	}
@@ -649,7 +655,7 @@ func (this *AIOConn) doWrite() {
 
 		for !this.w.empty() {
 			c := this.w.front()
-			this.service.postCompleteStatus(this, c.buffs, c.offset, err, c.context)
+			this.service.postCompleteStatus(this, c.buffs, c.transfered, err, c.context)
 			this.w.popFront()
 		}
 	} else if e == syscall.EAGAIN {
@@ -659,23 +665,31 @@ func (this *AIOConn) doWrite() {
 		}
 	} else {
 		remain := size
-		for remain > 0 {
-			c := this.w.front()
-			if remain >= len(c.buffs[c.index][c.offset:]) {
-
-			} else {
-				c.offset += remain
-				remain = 0
+		c := this.w.front()
+		if total == 0 {
+			//发送0字节包
+			this.service.postCompleteStatus(this, c.buffs, 0, nil, c.context)
+			this.w.popFront()
+		} else {
+			for remain > 0 {
+				s := len(c.buffs[c.index][c.offset:])
+				if remain >= s {
+					remain -= s
+					c.transfered += s
+					c.index++
+					c.offset = 0
+				} else {
+					c.offset += remain
+					c.transfered += remain
+					remain = 0
+				}
 			}
 
-			/*if remain >= len(c.buff[c.offset:]) {
-				this.service.postCompleteStatus(this, c.buff, len(c.buff), nil, c.context)
-				remain -= len(c.buff[c.offset:])
+			if c.index >= len(c.buffs) {
+				this.service.postCompleteStatus(this, c.buffs, c.transfered, nil, c.context)
 				this.w.popFront()
-			} else {
-				c.offset += remain
-				remain = 0
-			}*/
+			}
+
 		}
 
 		if size < total {

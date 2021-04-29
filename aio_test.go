@@ -80,12 +80,11 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 			} else {
 				if res.Err != nil {
 					res.Conn.Close(err)
-					//fmt.Println("client close")
 					atomic.AddInt32(&clientCount, -1)
 				} else if res.Context.(rune) == 'r' {
-					res.Conn.Send(res.Buff[:res.Bytestransfer], 'w')
+					res.Conn.Send('w', res.Buffs[0][:res.Bytestransfer])
 				} else {
-					res.Conn.Recv(res.Buff[:cap(res.Buff)], 'r')
+					res.Conn.Recv('r', res.Buffs[0][:cap(res.Buffs[0])])
 				}
 			}
 
@@ -93,7 +92,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 				break
 			}
 		}
-		//fmt.Println("server break")
+
 		w.Close()
 		close(die)
 	}()
@@ -124,7 +123,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 			//c.SetRecvTimeout(time.Second)
 
 			buff := make([]byte, bufsize)
-			if err := c.Recv(buff, 'r'); nil != err {
+			if err := c.Recv('r', buff); nil != err {
 				fmt.Println("first recv", err, "fd", c.fd)
 				panic("panic")
 			}
@@ -154,7 +153,7 @@ func TestDefault(t *testing.T) {
 
 	wx := make([]byte, 4096)
 
-	c.Send(wx, 'w')
+	c.Send('w', wx)
 
 	for {
 		res, err := GetCompleteStatus()
@@ -233,7 +232,7 @@ func TestBusySend(t *testing.T) {
 
 	go func() {
 		for {
-			if err := c.Send([]byte("string"), 'w'); nil != err {
+			if err := c.Send('w', []byte("string")); nil != err {
 				if err == ErrConnClosed {
 					atomic.AddInt32(&sendBreak, 1)
 					break
@@ -275,16 +274,12 @@ func TestSendMutilBuff(t *testing.T) {
 
 	wx := make([]byte, 1024)
 
-	c.Send(wx, 'w')
-	c.Send(wx, 'w')
-	c.Send(wx, 'w')
-	c.Send(wx, 'w')
-	c.Send(wx, 'w')
+	c.Send('w', wx, wx, wx, wx)
 
 	rx := make([]byte, 4096)
-	c.Recv(rx, 'r')
+	c.Recv('r', rx)
 
-	cc := 0
+	recved := 0
 
 	for {
 		res, err := GetCompleteStatus()
@@ -292,13 +287,17 @@ func TestSendMutilBuff(t *testing.T) {
 			break
 		} else if nil == res.Err {
 			if res.Context.(rune) == 'w' {
-				cc++
-				if cc == 5 {
-					res.Conn.Close(ErrActiveClose)
-					break
-				}
+				fmt.Println("send ok", res.Bytestransfer)
+				res.Conn.Recv('r', rx)
 			} else {
-				res.Conn.Recv(rx, 'r')
+				fmt.Println("recv", res.Bytestransfer)
+				recved += res.Bytestransfer
+				if recved == 4096 {
+					res.Conn.Close(nil)
+					break
+				} else {
+					res.Conn.Recv('r', rx)
+				}
 			}
 		}
 	}
@@ -362,7 +361,7 @@ func TestClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c.Recv(make([]byte, 1024), 'r')
+	c.Recv('r', make([]byte, 1024))
 
 	_, err = w.Bind(conn, AIOConnOption{})
 
@@ -401,11 +400,11 @@ func TestSendBigBuff(t *testing.T) {
 
 	wx := make([]byte, 1204*1024)
 
-	c.Send(wx, 'w')
+	c.Send('w', wx)
 
 	rx := make([]byte, 4096)
 
-	c.Recv(rx, 'r')
+	c.Recv('r', rx)
 
 	defer c.Close(ErrActiveClose)
 
@@ -417,7 +416,7 @@ func TestSendBigBuff(t *testing.T) {
 			if res.Context.(rune) == 'w' {
 				break
 			} else {
-				res.Conn.Recv(rx, 'r')
+				res.Conn.Recv('r', rx)
 			}
 		}
 	}
@@ -452,7 +451,7 @@ func TestShareBuffer(t *testing.T) {
 
 		wx := make([]byte, 4096)
 
-		c.Send(wx, 'w')
+		c.Send('w', wx)
 
 		defer c.Close(ErrActiveClose)
 	}
@@ -466,10 +465,10 @@ func TestShareBuffer(t *testing.T) {
 		} else if nil == res.Err {
 			if res.Context.(rune) == 'w' {
 				//使用ShareBuff,不需要提供buff
-				res.Conn.Recv(nil, 'r')
+				res.Conn.Recv('r')
 			} else {
 				//使用关闭归还buffpool供其它连接使用
-				buffpool.Release(res.Buff)
+				buffpool.Release(res.Buffs[0])
 				count++
 				if count == 10 {
 					break
@@ -514,9 +513,9 @@ func TestRecvBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c.Recv(make([]byte, 4096), 'r')
+	c.Recv('r', make([]byte, 4096))
 
-	assert.Equal(t, ErrBusy, c.Recv(make([]byte, 4096), 'r'))
+	assert.Equal(t, ErrBusy, c.Recv('r', make([]byte, 4096)))
 
 	c.Close(ErrActiveClose)
 
@@ -570,7 +569,7 @@ func TestSendBusy(t *testing.T) {
 
 		wx := make([]byte, 4096)
 
-		err := c.Send(wx, 'w')
+		err := c.Send('w', wx)
 		if nil != err {
 			assert.Equal(t, ErrBusy, err)
 			break
@@ -623,13 +622,13 @@ func TestRecvTimeout1(t *testing.T) {
 
 	rx := make([]byte, 4096)
 
-	c.Recv(rx, 'r')
+	c.Recv('r', rx)
 
 	c.SetRecvTimeout(time.Second)
 
 	rx = make([]byte, 4096)
 
-	c.Recv(rx, 'r')
+	c.Recv('r', rx)
 
 	count := 0
 
@@ -691,13 +690,13 @@ func TestRecvTimeout2(t *testing.T) {
 
 	rx := make([]byte, 4096)
 
-	c.Recv(rx, 'r')
+	c.Recv('r', rx)
 
 	c.SetRecvTimeout(time.Second)
 
 	rx = make([]byte, 4096)
 
-	c.Recv(rx, 'r')
+	c.Recv('r', rx)
 
 	c.SetRecvTimeout(0)
 
@@ -771,7 +770,7 @@ func TestRecvTimeout3(t *testing.T) {
 
 	rx := make([]byte, 4096)
 
-	c.Recv(rx, 'r')
+	c.Recv('r', rx)
 
 	die := make(chan struct{})
 
@@ -792,8 +791,8 @@ func TestRecvTimeout3(t *testing.T) {
 	}()
 
 	time.AfterFunc(time.Second*2, func() {
-		assert.Equal(t, c.Recv(rx, 'r'), ErrConnClosed)
-		assert.Equal(t, c.Send(rx, 'r'), ErrConnClosed)
+		assert.Equal(t, c.Recv('r', rx), ErrConnClosed)
+		assert.Equal(t, c.Send('r', rx), ErrConnClosed)
 		w.Close()
 	})
 
@@ -847,11 +846,11 @@ func TestSendTimeout1(t *testing.T) {
 
 	wx := make([]byte, 4096)
 
-	c.Send(wx, 'w')
+	c.Send('w', wx)
 
 	c.SetSendTimeout(time.Second)
 
-	c.Send(wx, 'w')
+	c.Send('w', wx)
 
 	for {
 		res, err := w.GetCompleteStatus()
@@ -864,7 +863,7 @@ func TestSendTimeout1(t *testing.T) {
 			res.Conn.Close(res.Err)
 			break
 		} else {
-			res.Conn.Send(wx, 'w')
+			res.Conn.Send('w', wx)
 		}
 	}
 
@@ -918,7 +917,7 @@ func TestSendTimeout2(t *testing.T) {
 
 	c.SetSendTimeout(time.Second)
 
-	c.Send(wx, 'w')
+	c.Send('w', wx)
 
 	c.SetSendTimeout(0)
 
@@ -933,7 +932,7 @@ func TestSendTimeout2(t *testing.T) {
 				assert.Equal(t, ErrCloseServiceClosed, res.Err)
 				break
 			} else {
-				res.Conn.Send(wx, 'w')
+				res.Conn.Send('w', wx)
 			}
 		}
 		close(die)
@@ -949,8 +948,8 @@ func TestSendTimeout2(t *testing.T) {
 		v.Close()
 	}
 
-	assert.Equal(t, ErrServiceClosed, c.Send(wx, nil))
-	assert.Equal(t, ErrServiceClosed, c.Recv(wx, nil))
+	assert.Equal(t, ErrServiceClosed, c.Send(nil, wx))
+	assert.Equal(t, ErrServiceClosed, c.Recv(nil, wx))
 
 }
 
@@ -995,7 +994,7 @@ func TestSendTimeout3(t *testing.T) {
 
 	wx := make([]byte, 1024*1024)
 
-	c.Send(wx, 'w')
+	c.Send('w', wx)
 
 	c.SetSendTimeout(time.Second)
 
@@ -1165,7 +1164,7 @@ func testParallel(t *testing.T, par int, msgsize int) {
 			conns = append(conns, c)
 
 			// send
-			err = c.Send(data, 'w')
+			err = c.Send('w', data)
 			if err != nil {
 				panic(err)
 				log.Fatal(err)
@@ -1201,7 +1200,7 @@ func testParallel(t *testing.T, par int, msgsize int) {
 						break
 					}
 				} else {
-					res.Conn.Recv(res.Buff[:cap(res.Buff)], 'r')
+					res.Conn.Recv('r', res.Buffs[0][:cap(res.Buffs[0])])
 				}
 			}
 		}
@@ -1281,8 +1280,8 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 			b.Fatal(err)
 		}
 
-		c.Send(tx, 'w')
-		c.Recv(rx, 'r')
+		c.Send('w', tx)
+		c.Recv('r', rx)
 		defer c.Close(ErrActiveClose)
 	}
 
@@ -1304,9 +1303,9 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 			if count >= target {
 				break
 			}
-			res.Conn.Send(res.Buff[:res.Bytestransfer], 'w')
+			res.Conn.Send('w', res.Buffs[0][:res.Bytestransfer])
 		} else {
-			res.Conn.Recv(res.Buff[:cap(res.Buff)], 'r')
+			res.Conn.Recv('r', res.Buffs[0][:cap(res.Buffs[0])])
 		}
 
 	}
