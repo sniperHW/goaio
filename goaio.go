@@ -24,6 +24,7 @@ var (
 	ErrCloseNone          = errors.New("close no reason")
 	ErrCloseGC            = errors.New("close by gc")
 	ErrCloseServiceClosed = errors.New("close because of service closed")
+	ErrEmptyBuff          = errors.New("send buffs is empty")
 )
 
 const (
@@ -65,6 +66,75 @@ type aioContextQueue struct {
 	tail  int
 	queue []aioContext
 }
+
+type AIOResult struct {
+	Conn          *AIOConn
+	Buffs         [][]byte
+	Context       interface{}
+	Err           error
+	Bytestransfer int
+}
+
+type completetionQueue struct {
+	mu        sync.Mutex
+	cond      *sync.Cond
+	head      int
+	tail      int
+	queue     []AIOResult
+	closed    bool
+	waitCount int
+}
+
+type AIOConn struct {
+	sync.Mutex
+	fd            int
+	rawconn       net.Conn
+	readable      bool
+	readableVer   int
+	writeable     bool
+	writeableVer  int
+	w             *aioContextQueue
+	r             *aioContextQueue
+	service       *AIOService
+	doing         bool
+	closed        bool
+	pollerVersion int32
+	closeOnce     sync.Once
+	sendTimeout   time.Duration
+	recvTimeout   time.Duration
+	timer         *time.Timer
+	reason        error
+	sharebuff     ShareBuffer
+	userData      interface{}
+	doTimeout     *time.Timer
+	tqIdx         int
+	pprev         *AIOConn
+	nnext         *AIOConn
+	ioCount       int
+	send_iovec    [MaxIovecSize]syscall.Iovec
+	recv_iovec    [MaxIovecSize]syscall.Iovec
+}
+
+type AIOService struct {
+	sync.Mutex
+	completeQueue *completetionQueue
+	tq            []*TaskQueue
+	poller        pollerI
+	closed        *int32
+	waitgroup     *sync.WaitGroup
+	closeOnce     sync.Once
+	connMgr       []*connMgr
+}
+
+type connMgr struct {
+	sync.Mutex
+	head   AIOConn
+	closed bool
+}
+
+var defalutService *AIOService
+
+var createOnce sync.Once
 
 func newAioContextQueue(max int) *aioContextQueue {
 	if max <= 0 {
@@ -132,23 +202,6 @@ func (this *aioContextQueue) packIovec(iovec *[MaxIovecSize]syscall.Iovec) (int,
 	} else {
 		cc := 0
 		total := 0
-		/*for i := this.head; ; {
-			ctx := &this.queue[i]
-			for j := ctx.index; j < len(ctx.buffs); j++ {
-				buff := ctx.buffs[ctx.index]
-				size := len(buff) - ctx.offset
-				(*iovec)[cc] = syscall.Iovec{&buff[ctx.offset], uint64(size)}
-				total += size
-				cc++
-				if total >= MaxIOSize || cc >= len(*iovec) {
-					return cc, total
-				}
-			}
-			i = (i + 1) % len(this.queue)
-			if i == this.tail {
-				break
-			}
-		}*/
 		ctx := &this.queue[this.head]
 		for j := ctx.index; j < len(ctx.buffs); j++ {
 			buff := ctx.buffs[ctx.index]
@@ -162,24 +215,6 @@ func (this *aioContextQueue) packIovec(iovec *[MaxIovecSize]syscall.Iovec) (int,
 		}
 		return cc, total
 	}
-}
-
-type AIOResult struct {
-	Conn          *AIOConn
-	Buffs         [][]byte
-	Context       interface{}
-	Err           error
-	Bytestransfer int
-}
-
-type completetionQueue struct {
-	mu        sync.Mutex
-	cond      *sync.Cond
-	head      int
-	tail      int
-	queue     []AIOResult
-	closed    bool
-	waitCount int
 }
 
 func newCompletetionQueue() *completetionQueue {
@@ -225,14 +260,13 @@ func (this *completetionQueue) pop() AIOResult {
 	return head
 }
 
-func (this *completetionQueue) push(r *AIOResult) bool {
+func (this *completetionQueue) push(r *AIOResult) {
 	if (this.tail+1)%len(this.queue) != this.head {
 		this.queue[this.tail] = *r
 		this.tail = (this.tail + 1) % len(this.queue)
-		return true
 	} else {
 		this.grow()
-		return this.push(r)
+		this.push(r)
 	}
 }
 
@@ -276,36 +310,6 @@ func (this *completetionQueue) getCompleteStatus() (res AIOResult, err error) {
 	res = this.pop()
 	this.mu.Unlock()
 	return
-}
-
-type AIOConn struct {
-	sync.Mutex
-	fd            int
-	rawconn       net.Conn
-	readable      bool
-	readableVer   int
-	writeable     bool
-	writeableVer  int
-	w             *aioContextQueue
-	r             *aioContextQueue
-	service       *AIOService
-	doing         bool
-	closed        bool
-	pollerVersion int32
-	closeOnce     sync.Once
-	sendTimeout   time.Duration
-	recvTimeout   time.Duration
-	timer         *time.Timer
-	reason        error
-	sharebuff     ShareBuffer
-	userData      interface{}
-	doTimeout     *time.Timer
-	tqIdx         int
-	pprev         *AIOConn
-	nnext         *AIOConn
-	ioCount       int
-	send_iovec    [MaxIovecSize]syscall.Iovec
-	recv_iovec    [MaxIovecSize]syscall.Iovec
 }
 
 func (this *AIOConn) GetUserData() interface{} {
@@ -630,8 +634,15 @@ func (this *AIOConn) doRead() {
 }
 
 func (this *AIOConn) doWrite() {
-	ver := this.writeableVer
 	cc, total := this.w.packIovec(&this.send_iovec)
+	if 0 == total {
+		c := this.w.front()
+		this.service.postCompleteStatus(this, c.buffs, c.transfered, ErrEmptyBuff, c.context)
+		this.w.popFront()
+		return
+	}
+
+	ver := this.writeableVer
 	this.Unlock()
 	var (
 		r uintptr
@@ -644,7 +655,7 @@ func (this *AIOConn) doWrite() {
 
 	if e == syscall.EINTR {
 		return
-	} else if (size == 0 && total > 0) || (e != 0 && e != syscall.EAGAIN) {
+	} else if size == 0 || (e != 0 && e != syscall.EAGAIN) {
 
 		var err error
 		if size == 0 {
@@ -666,30 +677,23 @@ func (this *AIOConn) doWrite() {
 	} else {
 		remain := size
 		c := this.w.front()
-		if total == 0 {
-			//发送0字节包
-			this.service.postCompleteStatus(this, c.buffs, 0, nil, c.context)
+		for remain > 0 {
+			s := len(c.buffs[c.index][c.offset:])
+			if remain >= s {
+				remain -= s
+				c.transfered += s
+				c.index++
+				c.offset = 0
+			} else {
+				c.offset += remain
+				c.transfered += remain
+				remain = 0
+			}
+		}
+
+		if c.index >= len(c.buffs) {
+			this.service.postCompleteStatus(this, c.buffs, c.transfered, nil, c.context)
 			this.w.popFront()
-		} else {
-			for remain > 0 {
-				s := len(c.buffs[c.index][c.offset:])
-				if remain >= s {
-					remain -= s
-					c.transfered += s
-					c.index++
-					c.offset = 0
-				} else {
-					c.offset += remain
-					c.transfered += remain
-					remain = 0
-				}
-			}
-
-			if c.index >= len(c.buffs) {
-				this.service.postCompleteStatus(this, c.buffs, c.transfered, nil, c.context)
-				this.w.popFront()
-			}
-
 		}
 
 		if size < total {
@@ -701,7 +705,7 @@ func (this *AIOConn) doWrite() {
 	}
 }
 
-func (this *AIOConn) Do() {
+func (this *AIOConn) do() {
 	this.Lock()
 	defer this.Unlock()
 	for {
@@ -741,23 +745,6 @@ func (this *AIOConn) Do() {
 	}
 
 	this.doing = false
-}
-
-type AIOService struct {
-	sync.Mutex
-	completeQueue *completetionQueue
-	tq            []*TaskQueue
-	poller        pollerI
-	closed        *int32
-	waitgroup     *sync.WaitGroup
-	closeOnce     sync.Once
-	connMgr       []*connMgr
-}
-
-type connMgr struct {
-	sync.Mutex
-	head   AIOConn
-	closed bool
 }
 
 func (this *connMgr) addIO(c *AIOConn) bool {
@@ -842,7 +829,7 @@ func NewAIOService(worker int) *AIOService {
 						return
 					} else {
 						for _, v := range queue {
-							v.(*AIOConn).Do()
+							v.(*AIOConn).do()
 						}
 					}
 				}
@@ -962,9 +949,6 @@ func (this *AIOService) Close() {
 		this.completeQueue.close()
 	})
 }
-
-var defalutService *AIOService
-var createOnce sync.Once
 
 func Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
 	createOnce.Do(func() {

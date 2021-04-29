@@ -11,10 +11,6 @@ import (
 	"time"
 )
 
-var clientcount int32
-var bytescount int32
-var packetcount int32
-
 func main() {
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:8110")

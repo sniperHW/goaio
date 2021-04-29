@@ -168,6 +168,70 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+func TestSendEmptyBuff(t *testing.T) {
+	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	ln, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	die := make(chan struct{})
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				buff := make([]byte, 4096)
+				for {
+					n, err := conn.Read(buff)
+					fmt.Println(n, err)
+					conn.Close()
+					close(die)
+					break
+				}
+			}()
+		}
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Bind(conn, AIOConnOption{})
+
+	if nil != err {
+		t.Fatal(err)
+	}
+
+	go func() {
+		for {
+			res, err := GetCompleteStatus()
+			if nil != err {
+				break
+			} else if nil != res.Err {
+				assert.Equal(t, res.Err, ErrEmptyBuff)
+				res.Conn.Close(nil)
+				break
+			}
+		}
+	}()
+
+	c.Send('w')
+
+	<-die
+
+	ln.Close()
+
+}
+
 func TestBusySend(t *testing.T) {
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
@@ -251,6 +315,152 @@ func TestBusySend(t *testing.T) {
 	<-die
 
 	ln.Close()
+}
+
+func TestRecvUseEmptyBuff(t *testing.T) {
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	ln, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	w := NewAIOService(1)
+
+	die := make(chan struct{})
+
+	go func() {
+		for {
+			res, err := w.GetCompleteStatus()
+			if nil != err {
+				break
+			} else {
+				if res.Err != nil {
+
+				} else if res.Context.(rune) == 'r' {
+					assert.Equal(t, 5, res.Bytestransfer)
+					close(die)
+					return
+				}
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Temporary() {
+					continue
+				} else {
+					return
+				}
+			}
+
+			c, err := w.Bind(conn, AIOConnOption{})
+			if err != nil {
+				panic(err)
+				w.Close()
+				return
+			}
+
+			if err := c.Recv('r'); nil != err {
+				fmt.Println("first recv", err, "fd", c.fd)
+				panic("panic")
+			}
+		}
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := w.Bind(conn, AIOConnOption{})
+
+	c.Send('w', []byte("hello"))
+
+	<-die
+
+	ln.Close()
+
+}
+
+func TestRecvMutilBuff(t *testing.T) {
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	ln, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	w := NewAIOService(1)
+
+	die := make(chan struct{})
+
+	go func() {
+		for {
+			res, err := w.GetCompleteStatus()
+			if nil != err {
+				break
+			} else {
+				if res.Err != nil {
+
+				} else if res.Context.(rune) == 'r' {
+					assert.Equal(t, 5, res.Bytestransfer)
+					close(die)
+					return
+				}
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Temporary() {
+					continue
+				} else {
+					return
+				}
+			}
+
+			c, err := w.Bind(conn, AIOConnOption{})
+			if err != nil {
+				panic(err)
+				w.Close()
+				return
+			}
+
+			if err := c.Recv('r', make([]byte, 1), make([]byte, 1), make([]byte, 1), make([]byte, 1), make([]byte, 1)); nil != err {
+				fmt.Println("first recv", err, "fd", c.fd)
+				panic("panic")
+			}
+		}
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := w.Bind(conn, AIOConnOption{})
+
+	c.Send('w', []byte("h"), []byte("e"), []byte("l"), []byte("l"), []byte("o"))
+
+	<-die
+
+	ln.Close()
+
 }
 
 func TestSendMutilBuff(t *testing.T) {
