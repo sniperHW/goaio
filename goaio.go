@@ -90,7 +90,7 @@ func (this *aioContextQueue) add(c aioContext) error {
 
 func (this *aioContextQueue) dropLast() {
 	if this.head != this.tail {
-		this.queue[this.tail].buff = nil
+		this.queue[this.tail].buffs = nil
 		this.queue[this.tail].context = nil
 		if this.tail == 0 {
 			this.tail = len(this.queue) - 1
@@ -106,7 +106,7 @@ func (this *aioContextQueue) front() *aioContext {
 
 func (this *aioContextQueue) popFront() {
 	if this.head != this.tail {
-		this.queue[this.head].buff = nil
+		this.queue[this.head].buffs = nil
 		this.queue[this.head].context = nil
 		this.head = (this.head + 1) % len(this.queue)
 	}
@@ -131,7 +131,7 @@ func (this *aioContextQueue) packIovec(iovec *[MaxIovecSize]syscall.Iovec) (int,
 	} else {
 		cc := 0
 		total := 0
-		for i := this.head; ; {
+		/*for i := this.head; ; {
 			ctx := &this.queue[i]
 			for j := ctx.index; j < len(ctx.buffs); j++ {
 				buff := ctx.buffs[ctx.index]
@@ -147,6 +147,17 @@ func (this *aioContextQueue) packIovec(iovec *[MaxIovecSize]syscall.Iovec) (int,
 			if i == this.tail {
 				break
 			}
+		}*/
+		ctx := &this.queue[this.head]
+		for j := ctx.index; j < len(ctx.buffs); j++ {
+			buff := ctx.buffs[ctx.index]
+			size := len(buff) - ctx.offset
+			(*iovec)[cc] = syscall.Iovec{&buff[ctx.offset], uint64(size)}
+			total += size
+			cc++
+			if total >= MaxIOSize || cc >= len(*iovec) {
+				break
+			}
 		}
 		return cc, total
 	}
@@ -154,7 +165,7 @@ func (this *aioContextQueue) packIovec(iovec *[MaxIovecSize]syscall.Iovec) (int,
 
 type AIOResult struct {
 	Conn          *AIOConn
-	Buffs         []byte
+	Buffs         [][]byte
 	Context       interface{}
 	Err           error
 	Bytestransfer int
@@ -207,7 +218,7 @@ func (this *completetionQueue) pop() AIOResult {
 	}
 	head := this.queue[this.head]
 	this.queue[this.head].Conn = nil
-	this.queue[this.head].Buff = nil
+	this.queue[this.head].Buffs = nil
 	this.queue[this.head].Context = nil
 	this.head = (this.head + 1) % len(this.queue)
 	return head
@@ -293,7 +304,7 @@ type AIOConn struct {
 	nnext         *AIOConn
 	ioCount       int
 	send_iovec    [MaxIovecSize]syscall.Iovec
-	resv_iovec    [MaxIovecSize]syscall.Iovec
+	recv_iovec    [MaxIovecSize]syscall.Iovec
 }
 
 func (this *AIOConn) GetUserData() interface{} {
@@ -330,7 +341,7 @@ func (this *AIOConn) processTimeout() {
 		for !this.r.empty() {
 			f := this.r.front()
 			if now.After(f.deadline) {
-				this.service.postCompleteStatus(this, f.buff, 0, ErrRecvTimeout, f.context)
+				this.service.postCompleteStatus(this, f.buffs, 0, ErrRecvTimeout, f.context)
 				this.r.popFront()
 			} else {
 				break
@@ -342,7 +353,7 @@ func (this *AIOConn) processTimeout() {
 		for !this.w.empty() {
 			f := this.w.front()
 			if now.After(f.deadline) {
-				this.service.postCompleteStatus(this, f.buff, f.offset, ErrSendTimeout, f.context)
+				this.service.postCompleteStatus(this, f.buffs, f.offset, ErrSendTimeout, f.context)
 				this.w.popFront()
 			} else {
 				break
@@ -432,7 +443,7 @@ func (this *AIOConn) canWrite() bool {
 	return this.writeable && !this.w.empty()
 }
 
-func (this *AIOConn) Send(buffs []byte, context interface{}) error {
+func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
 	if atomic.LoadInt32(this.service.closed) == 1 {
 		return ErrServiceClosed
 	}
@@ -478,7 +489,7 @@ func (this *AIOConn) Send(buffs []byte, context interface{}) error {
 	}
 }
 
-func (this *AIOConn) Recv(buffs []byte, context interface{}) error {
+func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 	if atomic.LoadInt32(this.service.closed) == 1 {
 		return ErrServiceClosed
 	}
@@ -546,56 +557,70 @@ func (this *AIOConn) onActive(ev int) {
 }
 
 func (this *AIOConn) doRead() {
-	/*c := this.r.front()
+	c := this.r.front()
 	ver := this.readableVer
 	this.Unlock()
-	var buff []byte
 	userShareBuffer := false
-	if len(c.buff) == 0 {
+	var sharebuff []byte
+	var cc int
+	if len(c.buffs) == 0 {
 		if nil != this.sharebuff {
-			buff = this.sharebuff.Acquire()
+			sharebuff := this.sharebuff.Acquire()
+			this.recv_iovec[0] = syscall.Iovec{&sharebuff[0], uint64(len(sharebuff))}
 			userShareBuffer = true
+			cc = 1
 		} else {
-			buff = make([]byte, 4096)
-			c.buff = buff
+			c.buffs = append(c.buffs, make([]byte, 4096))
 		}
-	} else {
-		buff = c.buff
 	}
 
-	size, err := syscall.Read(this.fd, buff)
+	if !userShareBuffer {
+		cc, _ = this.w.packIovec(&this.recv_iovec)
+	}
+
+	var (
+		r uintptr
+		e syscall.Errno
+	)
+
+	r, _, e = syscall.Syscall(syscall.SYS_READV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.recv_iovec[0])), uintptr(cc))
+	size := int(r)
 	this.Lock()
-	if err == syscall.EINTR {
+
+	if e == syscall.EINTR {
 		return
-	} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
+	} else if size == 0 || (e != 0 && e != syscall.EAGAIN) {
+
+		var err error
 		if size == 0 {
 			err = io.EOF
+		} else {
+			err = e
 		}
 
 		if userShareBuffer {
-			this.sharebuff.Release(buff)
-			buff = nil
+			this.sharebuff.Release(sharebuff)
 		}
 
 		for !this.r.empty() {
 			c := this.r.front()
-			this.service.postCompleteStatus(this, c.buff, 0, err, c.context)
+			this.service.postCompleteStatus(this, c.buffs, 0, err, c.context)
 			this.r.popFront()
 		}
 
-	} else if err == syscall.EAGAIN {
+	} else if e == syscall.EAGAIN {
 		if ver == this.readableVer {
 			this.readable = false
 		}
 
 		if userShareBuffer {
-			this.sharebuff.Release(buff)
+			this.sharebuff.Release(sharebuff)
 		}
 
 	} else {
-		this.service.postCompleteStatus(this, buff, size, nil, c.context)
+		this.service.postCompleteStatus(this, c.buffs, size, nil, c.context)
 		this.r.popFront()
-	}*/
+	}
 }
 
 func (this *AIOConn) doWrite() {
@@ -633,17 +658,24 @@ func (this *AIOConn) doWrite() {
 			this.service.poller.enableWrite(this)
 		}
 	} else {
-		/*remain := size
+		remain := size
 		for remain > 0 {
 			c := this.w.front()
-			if remain >= len(c.buff[c.offset:]) {
+			if remain >= len(c.buffs[c.index][c.offset:]) {
+
+			} else {
+				c.offset += remain
+				remain = 0
+			}
+
+			/*if remain >= len(c.buff[c.offset:]) {
 				this.service.postCompleteStatus(this, c.buff, len(c.buff), nil, c.context)
 				remain -= len(c.buff[c.offset:])
 				this.w.popFront()
 			} else {
 				c.offset += remain
 				remain = 0
-			}
+			}*/
 		}
 
 		if size < total {
@@ -651,7 +683,7 @@ func (this *AIOConn) doWrite() {
 				this.writeable = false
 				this.service.poller.enableWrite(this)
 			}
-		}*/
+		}
 	}
 }
 
@@ -662,12 +694,12 @@ func (this *AIOConn) Do() {
 		if this.closed {
 			for !this.r.empty() {
 				c := this.r.front()
-				this.service.postCompleteStatus(this, c.buff, 0, this.reason, c.context)
+				this.service.postCompleteStatus(this, c.buffs, 0, this.reason, c.context)
 				this.r.popFront()
 			}
 			for !this.w.empty() {
 				c := this.w.front()
-				this.service.postCompleteStatus(this, c.buff, c.offset, this.reason, c.context)
+				this.service.postCompleteStatus(this, c.buffs, c.offset, this.reason, c.context)
 				this.w.popFront()
 			}
 			this.service.unwatch(this)
@@ -885,7 +917,7 @@ func (this *AIOService) pushIOTask(c *AIOConn) error {
 	return this.tq[c.tqIdx].Push(c)
 }
 
-func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfer int, err error, context interface{}) {
+func (this *AIOService) postCompleteStatus(c *AIOConn, buff [][]byte, bytestransfer int, err error, context interface{}) {
 	this.subIO(c)
 	this.completeQueue.postCompleteStatus(c, buff, bytestransfer, err, context)
 }
