@@ -32,6 +32,9 @@ const (
 	EV_ERROR = int(1 << 3)
 )
 
+const MaxIOSize = 1024 * 256
+const MaxIovecSize = 64
+
 var (
 	DefaultWorkerCount = 1
 )
@@ -49,8 +52,9 @@ type AIOConnOption struct {
 }
 
 type aioContext struct {
-	buff     []byte
-	offset   int
+	buffs    [][]byte
+	index    int //buffs索引
+	offset   int //[]byte内下标
 	context  interface{}
 	deadline time.Time
 }
@@ -121,20 +125,26 @@ func (this *aioContextQueue) setDeadline(deadline time.Time) bool {
 	}
 }
 
-func (this *aioContextQueue) packIovec(iovec *[MaxSendIovecSize]syscall.Iovec) (int, int) {
+func (this *aioContextQueue) packIovec(iovec *[MaxIovecSize]syscall.Iovec) (int, int) {
 	if this.empty() {
 		return 0, 0
 	} else {
 		cc := 0
 		total := 0
 		for i := this.head; ; {
-			b := &this.queue[i]
-			size := len(b.buff) - b.offset
-			(*iovec)[cc] = syscall.Iovec{&b.buff[b.offset], uint64(size)}
-			total += size
-			cc++
+			ctx := &this.queue[i]
+			for j := ctx.index; j < len(ctx.buffs); j++ {
+				buff := ctx.buffs[ctx.index]
+				size := len(buff) - ctx.offset
+				(*iovec)[cc] = syscall.Iovec{&buff[ctx.offset], uint64(size)}
+				total += size
+				cc++
+				if total >= MaxIOSize || cc >= len(*iovec) {
+					return cc, total
+				}
+			}
 			i = (i + 1) % len(this.queue)
-			if i == this.tail || total >= MaxSendSize || cc >= len(*iovec) {
+			if i == this.tail {
 				break
 			}
 		}
@@ -144,7 +154,7 @@ func (this *aioContextQueue) packIovec(iovec *[MaxSendIovecSize]syscall.Iovec) (
 
 type AIOResult struct {
 	Conn          *AIOConn
-	Buff          []byte
+	Buffs         []byte
 	Context       interface{}
 	Err           error
 	Bytestransfer int
@@ -214,7 +224,7 @@ func (this *completetionQueue) push(r *AIOResult) bool {
 	}
 }
 
-func (this *completetionQueue) postCompleteStatus(c *AIOConn, buff []byte, bytestransfer int, err error, context interface{}) {
+func (this *completetionQueue) postCompleteStatus(c *AIOConn, buffs [][]byte, bytestransfer int, err error, context interface{}) {
 	this.mu.Lock()
 	if this.closed {
 		this.mu.Unlock()
@@ -223,7 +233,7 @@ func (this *completetionQueue) postCompleteStatus(c *AIOConn, buff []byte, bytes
 			Conn:          c,
 			Context:       context,
 			Err:           err,
-			Buff:          buff,
+			Buffs:         buffs,
 			Bytestransfer: bytestransfer,
 		})
 
@@ -256,9 +266,6 @@ func (this *completetionQueue) getCompleteStatus() (res AIOResult, err error) {
 	return
 }
 
-const MaxSendSize = 1024 * 256
-const MaxSendIovecSize = 64
-
 type AIOConn struct {
 	sync.Mutex
 	fd            int
@@ -285,7 +292,8 @@ type AIOConn struct {
 	pprev         *AIOConn
 	nnext         *AIOConn
 	ioCount       int
-	send_iovec    [MaxSendIovecSize]syscall.Iovec
+	send_iovec    [MaxIovecSize]syscall.Iovec
+	resv_iovec    [MaxIovecSize]syscall.Iovec
 }
 
 func (this *AIOConn) GetUserData() interface{} {
@@ -380,7 +388,7 @@ func (this *AIOConn) SetRecvTimeout(timeout time.Duration) {
 		if timeout != 0 {
 			deadline := time.Now().Add(timeout)
 			if this.r.setDeadline(deadline) {
-				this.timer = time.AfterFunc(timeout, this.onTimeout) //newTimer(timeout, this.onTimeout)
+				this.timer = time.AfterFunc(timeout, this.onTimeout)
 			}
 		} else {
 			this.r.setDeadline(time.Time{})
@@ -400,7 +408,7 @@ func (this *AIOConn) SetSendTimeout(timeout time.Duration) {
 		if timeout != 0 {
 			deadline := time.Now().Add(timeout)
 			if this.w.setDeadline(deadline) {
-				this.timer = time.AfterFunc(timeout, this.onTimeout) //newTimer(timeout, this.onTimeout)
+				this.timer = time.AfterFunc(timeout, this.onTimeout)
 			}
 		} else {
 			this.w.setDeadline(time.Time{})
@@ -424,7 +432,7 @@ func (this *AIOConn) canWrite() bool {
 	return this.writeable && !this.w.empty()
 }
 
-func (this *AIOConn) Send(buff []byte, context interface{}) error {
+func (this *AIOConn) Send(buffs []byte, context interface{}) error {
 	if atomic.LoadInt32(this.service.closed) == 1 {
 		return ErrServiceClosed
 	}
@@ -445,7 +453,7 @@ func (this *AIOConn) Send(buff []byte, context interface{}) error {
 		}
 
 		if err := this.w.add(aioContext{
-			buff:     buff,
+			buffs:    buffs,
 			context:  context,
 			deadline: deadline,
 		}); nil != err {
@@ -470,7 +478,7 @@ func (this *AIOConn) Send(buff []byte, context interface{}) error {
 	}
 }
 
-func (this *AIOConn) Recv(buff []byte, context interface{}) error {
+func (this *AIOConn) Recv(buffs []byte, context interface{}) error {
 	if atomic.LoadInt32(this.service.closed) == 1 {
 		return ErrServiceClosed
 	}
@@ -491,7 +499,7 @@ func (this *AIOConn) Recv(buff []byte, context interface{}) error {
 		}
 
 		if err := this.r.add(aioContext{
-			buff:     buff,
+			buffs:    buffs,
 			context:  context,
 			deadline: deadline,
 		}); nil != err {
@@ -538,7 +546,7 @@ func (this *AIOConn) onActive(ev int) {
 }
 
 func (this *AIOConn) doRead() {
-	c := this.r.front()
+	/*c := this.r.front()
 	ver := this.readableVer
 	this.Unlock()
 	var buff []byte
@@ -587,7 +595,7 @@ func (this *AIOConn) doRead() {
 	} else {
 		this.service.postCompleteStatus(this, buff, size, nil, c.context)
 		this.r.popFront()
-	}
+	}*/
 }
 
 func (this *AIOConn) doWrite() {
@@ -616,7 +624,7 @@ func (this *AIOConn) doWrite() {
 
 		for !this.w.empty() {
 			c := this.w.front()
-			this.service.postCompleteStatus(this, c.buff, c.offset, err, c.context)
+			this.service.postCompleteStatus(this, c.buffs, c.offset, err, c.context)
 			this.w.popFront()
 		}
 	} else if e == syscall.EAGAIN {
@@ -625,7 +633,7 @@ func (this *AIOConn) doWrite() {
 			this.service.poller.enableWrite(this)
 		}
 	} else {
-		remain := size
+		/*remain := size
 		for remain > 0 {
 			c := this.w.front()
 			if remain >= len(c.buff[c.offset:]) {
@@ -643,7 +651,7 @@ func (this *AIOConn) doWrite() {
 				this.writeable = false
 				this.service.poller.enableWrite(this)
 			}
-		}
+		}*/
 	}
 }
 
