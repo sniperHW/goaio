@@ -570,7 +570,6 @@ func (this *AIOConn) doRead() {
 			total = len(sharebuff)
 		} else {
 			c.buffs = append(c.buffs, make([]byte, 4096))
-			total = 4096
 		}
 	}
 
