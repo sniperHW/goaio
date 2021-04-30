@@ -33,7 +33,6 @@ const (
 	EV_ERROR = int(1 << 3)
 )
 
-const MaxIOSize = 1024 * 256
 const MaxIovecSize = 64
 
 var (
@@ -161,8 +160,7 @@ func (this *aioContextQueue) add(c aioContext) error {
 
 func (this *aioContextQueue) dropLast() {
 	if this.head != this.tail {
-		this.queue[this.tail].buffs = nil
-		this.queue[this.tail].context = nil
+		this.queue[this.tail] = aioContext{}
 		if this.tail == 0 {
 			this.tail = len(this.queue) - 1
 		} else {
@@ -177,8 +175,7 @@ func (this *aioContextQueue) front() *aioContext {
 
 func (this *aioContextQueue) popFront() {
 	if this.head != this.tail {
-		this.queue[this.head].buffs = nil
-		this.queue[this.head].context = nil
+		this.queue[this.head] = aioContext{}
 		this.head = (this.head + 1) % len(this.queue)
 	}
 }
@@ -203,15 +200,12 @@ func (this *aioContextQueue) packIovec(iovec *[MaxIovecSize]syscall.Iovec) (int,
 		cc := 0
 		total := 0
 		ctx := &this.queue[this.head]
-		for j := ctx.index; j < len(ctx.buffs); j++ {
+		for j := ctx.index; j < len(ctx.buffs) && cc < len(*iovec); j++ {
 			buff := ctx.buffs[ctx.index]
 			size := len(buff) - ctx.offset
 			(*iovec)[cc] = syscall.Iovec{&buff[ctx.offset], uint64(size)}
 			total += size
 			cc++
-			if total >= MaxIOSize || cc >= len(*iovec) {
-				break
-			}
 		}
 		return cc, total
 	}
@@ -253,9 +247,7 @@ func (this *completetionQueue) pop() AIOResult {
 		panic("empty")
 	}
 	head := this.queue[this.head]
-	this.queue[this.head].Conn = nil
-	this.queue[this.head].Buffs = nil
-	this.queue[this.head].Context = nil
+	this.queue[this.head] = AIOResult{}
 	this.head = (this.head + 1) % len(this.queue)
 	return head
 }
