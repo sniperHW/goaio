@@ -333,6 +333,7 @@ func (this *AIOConn) Close(reason error) {
 }
 
 func (this *AIOConn) processTimeout() {
+	this.timer = nil
 	now := time.Now()
 	if this.recvTimeout > 0 {
 		for !this.r.empty() {
@@ -356,21 +357,6 @@ func (this *AIOConn) processTimeout() {
 				break
 			}
 		}
-	}
-
-	var deadline time.Time
-	if this.recvTimeout > 0 && !this.r.empty() && this.r.front().deadline.After(deadline) {
-		deadline = this.r.front().deadline
-	}
-
-	if this.sendTimeout > 0 && !this.w.empty() && this.w.front().deadline.After(deadline) {
-		deadline = this.w.front().deadline
-	}
-
-	if !deadline.IsZero() {
-		this.timer = time.AfterFunc(now.Sub(deadline), this.onTimeout)
-	} else {
-		this.timer = nil
 	}
 }
 
@@ -736,6 +722,23 @@ func (this *AIOConn) do() {
 			}
 
 			if !(this.closed || this.canRead() || this.canWrite()) {
+
+				var deadline time.Time
+				if this.recvTimeout > 0 && !this.r.empty() && this.r.front().deadline.After(deadline) {
+					deadline = this.r.front().deadline
+				}
+
+				if this.sendTimeout > 0 && !this.w.empty() && this.w.front().deadline.After(deadline) {
+					deadline = this.w.front().deadline
+				}
+
+				if !deadline.IsZero() {
+					this.timer = time.AfterFunc(time.Now().Sub(deadline), this.onTimeout)
+				} else if nil != this.timer {
+					this.timer.Stop()
+					this.timer = nil
+				}
+
 				break
 			}
 		}
