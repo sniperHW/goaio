@@ -1,6 +1,7 @@
 package goaio
 
 import (
+	"container/heap"
 	"errors"
 	"io"
 	"net"
@@ -101,11 +102,11 @@ type AIOConn struct {
 	closeOnce     sync.Once
 	sendTimeout   time.Duration
 	recvTimeout   time.Duration
-	timer         *time.Timer
+	timer         *timer
 	reason        error
 	sharebuff     ShareBuffer
 	userData      interface{}
-	doTimeout     *time.Timer
+	doTimeout     *timer
 	tqIdx         int
 	pprev         *AIOConn
 	nnext         *AIOConn
@@ -123,6 +124,9 @@ type AIOService struct {
 	waitgroup     *sync.WaitGroup
 	closeOnce     sync.Once
 	connMgr       []*connMgr
+	muTimer       sync.Mutex
+	timedHeap     timedHeap
+	timer         *time.Timer
 }
 
 type connMgr struct {
@@ -320,7 +324,7 @@ func (this *AIOConn) Close(reason error) {
 		this.reason = reason
 
 		if nil != this.timer {
-			this.timer.Stop()
+			this.service.stopTimer(this.timer)
 			this.timer = nil
 		}
 		if !this.doing {
@@ -368,7 +372,7 @@ func (this *AIOConn) processTimeout() {
 	}
 
 	if !deadline.IsZero() {
-		this.timer = time.AfterFunc(now.Sub(deadline), this.onTimeout)
+		this.timer = this.service.addTimer(now.Sub(deadline), this.onTimeout)
 	} else {
 		this.timer = nil
 	}
@@ -389,14 +393,14 @@ func (this *AIOConn) SetRecvTimeout(timeout time.Duration) {
 	defer this.Unlock()
 	if !this.closed {
 		if nil != this.timer {
-			this.timer.Stop()
+			this.service.stopTimer(this.timer)
 			this.timer = nil
 		}
 		this.recvTimeout = timeout
 		if timeout != 0 {
 			deadline := time.Now().Add(timeout)
 			if this.r.setDeadline(deadline) {
-				this.timer = time.AfterFunc(timeout, this.onTimeout)
+				this.timer = this.service.addTimer(timeout, this.onTimeout)
 			}
 		} else {
 			this.r.setDeadline(time.Time{})
@@ -409,14 +413,14 @@ func (this *AIOConn) SetSendTimeout(timeout time.Duration) {
 	defer this.Unlock()
 	if !this.closed {
 		if nil != this.timer {
-			this.timer.Stop()
+			this.service.stopTimer(this.timer)
 			this.timer = nil
 		}
 		this.sendTimeout = timeout
 		if timeout != 0 {
 			deadline := time.Now().Add(timeout)
 			if this.w.setDeadline(deadline) {
-				this.timer = time.AfterFunc(timeout, this.onTimeout)
+				this.timer = this.service.addTimer(timeout, this.onTimeout)
 			}
 		} else {
 			this.w.setDeadline(time.Time{})
@@ -474,7 +478,7 @@ func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
 		}
 
 		if !deadline.IsZero() && nil == this.timer {
-			this.timer = time.AfterFunc(timeout, this.onTimeout)
+			this.timer = this.service.addTimer(timeout, this.onTimeout)
 		}
 
 		if this.writeable && !this.doing {
@@ -520,7 +524,7 @@ func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 		}
 
 		if !deadline.IsZero() && nil == this.timer {
-			this.timer = time.AfterFunc(timeout, this.onTimeout)
+			this.timer = this.service.addTimer(timeout, this.onTimeout)
 		}
 
 		if this.readable && !this.doing {
@@ -802,6 +806,9 @@ func NewAIOService(worker int) *AIOService {
 		s.connMgr = make([]*connMgr, 251)
 		s.waitgroup = waitgroup
 		s.closed = new(int32)
+
+		heap.Init(&s.timedHeap)
+
 		for k, _ := range s.connMgr {
 			m := &connMgr{}
 			m.head.nnext = &m.head
@@ -843,6 +850,58 @@ func NewAIOService(worker int) *AIOService {
 	} else {
 		return nil
 	}
+}
+
+func (this *AIOService) timerCB() {
+	now := time.Now()
+	this.muTimer.Lock()
+
+	for this.timedHeap.Len() > 0 {
+		if now.After(this.timedHeap[0].deadline) {
+			t := heap.Pop(&this.timedHeap).(*timer)
+			this.muTimer.Unlock()
+			if atomic.CompareAndSwapInt32(&t.status, waitting, firing) {
+				t.timeoutCB()
+			}
+			this.muTimer.Lock()
+		} else {
+			break
+		}
+	}
+
+	if this.timedHeap.Len() > 0 {
+		this.timer = time.AfterFunc(now.Sub(this.timedHeap[0].deadline), this.timerCB)
+	} else {
+		this.timer = nil
+	}
+
+	this.muTimer.Unlock()
+}
+
+func (this *AIOService) addTimer(timeout time.Duration, cb func()) *timer {
+	now := time.Now()
+
+	t := &timer{
+		timeoutCB: cb,
+		deadline:  now.Add(timeout),
+	}
+
+	this.muTimer.Lock()
+	defer this.muTimer.Unlock()
+	heap.Push(&this.timedHeap, t)
+
+	if this.timedHeap[0] == t {
+		if nil != this.timer {
+			this.timer.Stop()
+		}
+		this.timer = time.AfterFunc(now.Sub(this.timedHeap[0].deadline), this.timerCB)
+	}
+
+	return t
+}
+
+func (this *AIOService) stopTimer(t *timer) {
+	atomic.CompareAndSwapInt32(&t.status, waitting, stoped)
 }
 
 func (this *AIOService) unwatch(c *AIOConn) {
