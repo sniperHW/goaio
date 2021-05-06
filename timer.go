@@ -4,17 +4,10 @@ import (
 	"time"
 )
 
-const (
-	waitting int32 = 0
-	firing   int32 = 1
-	stoped   int32 = 2
-)
-
 type timer struct {
 	idx       int
 	timeoutCB func()
 	deadline  time.Time
-	status    int32
 }
 
 type timedHeap []*timer

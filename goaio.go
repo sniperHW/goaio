@@ -860,9 +860,7 @@ func (this *AIOService) timerCB() {
 		if now.After(this.timedHeap[0].deadline) {
 			t := heap.Pop(&this.timedHeap).(*timer)
 			this.muTimer.Unlock()
-			if atomic.CompareAndSwapInt32(&t.status, waitting, firing) {
-				t.timeoutCB()
-			}
+			t.timeoutCB()
 			this.muTimer.Lock()
 		} else {
 			break
@@ -901,7 +899,11 @@ func (this *AIOService) addTimer(timeout time.Duration, cb func()) *timer {
 }
 
 func (this *AIOService) stopTimer(t *timer) {
-	atomic.CompareAndSwapInt32(&t.status, waitting, stoped)
+	this.muTimer.Lock()
+	defer this.muTimer.Unlock()
+	if this.timedHeap[t.idx] == t {
+		heap.Remove(&this.timedHeap, t.idx)
+	}
 }
 
 func (this *AIOService) unwatch(c *AIOConn) {
