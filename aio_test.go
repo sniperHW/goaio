@@ -299,6 +299,9 @@ func TestBusySend(t *testing.T) {
 			if err := c.Send('w', []byte("string")); nil != err {
 				if err == ErrConnClosed {
 					atomic.AddInt32(&sendBreak, 1)
+					if atomic.LoadInt32(&sendCount) == 0 {
+						close(die)
+					}
 					break
 				}
 			} else {
