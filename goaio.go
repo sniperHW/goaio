@@ -105,6 +105,7 @@ type AIOConn struct {
 	reason        error
 	sharebuff     ShareBuffer
 	userData      interface{}
+	doTimeout     *time.Timer
 	tqIdx         int
 	pprev         *AIOConn
 	nnext         *AIOConn
@@ -375,12 +376,11 @@ func (this *AIOConn) processTimeout() {
 
 func (this *AIOConn) onTimeout() {
 	this.Lock()
-	if !this.doing {
+	defer this.Unlock()
+	this.doTimeout = this.timer
+	if nil != this.doTimeout && !this.doing {
 		this.doing = true
-		this.Unlock()
-		this.do(true)
-	} else {
-		this.Unlock()
+		this.service.pushIOTask(this)
 	}
 }
 
@@ -702,7 +702,7 @@ func (this *AIOConn) doWrite() {
 	}
 }
 
-func (this *AIOConn) do(checkTimeout ...bool) {
+func (this *AIOConn) do() {
 	this.Lock()
 	defer this.Unlock()
 	for {
@@ -722,7 +722,8 @@ func (this *AIOConn) do(checkTimeout ...bool) {
 			return
 		} else {
 
-			if len(checkTimeout) > 0 && checkTimeout[0] {
+			if nil != this.doTimeout && this.timer == this.doTimeout {
+				this.doTimeout = nil
 				this.processTimeout()
 			}
 
