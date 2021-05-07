@@ -25,8 +25,8 @@ func main() {
 
 	go func() {
 		for {
-			res, err := goaio.GetCompleteStatus()
-			if nil != err {
+			res, ok := goaio.GetCompleteStatus()
+			if !ok {
 				return
 			} else if nil != res.Err {
 				fmt.Println("go error", res.Err)

@@ -150,11 +150,11 @@ func (this *aioContextQueue) empty() bool {
 }
 
 func (this *aioContextQueue) add(c aioContext) error {
-	if (this.tail+1)%len(this.queue) == this.head {
+	if next := (this.tail + 1) % len(this.queue); next == this.head {
 		return ErrBusy
 	} else {
 		this.queue[this.tail] = c
-		this.tail = (this.tail + 1) % len(this.queue)
+		this.tail = next
 		return nil
 	}
 }
@@ -330,14 +330,6 @@ func (this *AIOConn) SetSendTimeout(timeout time.Duration) {
 	}
 }
 
-func (this *AIOConn) getRecvTimeout() time.Duration {
-	return this.recvTimeout
-}
-
-func (this *AIOConn) getSendTimeout() time.Duration {
-	return this.sendTimeout
-}
-
 func (this *AIOConn) canRead() bool {
 	return this.readable && !this.r.empty()
 }
@@ -356,10 +348,8 @@ func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
 
 		var deadline time.Time
 
-		timeout := this.getSendTimeout()
-
-		if 0 != timeout {
-			deadline = time.Now().Add(timeout)
+		if 0 != this.sendTimeout {
+			deadline = time.Now().Add(this.sendTimeout)
 		}
 
 		if err := this.w.add(aioContext{
@@ -376,7 +366,7 @@ func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
 		}
 
 		if !deadline.IsZero() && nil == this.timer {
-			this.timer = time.AfterFunc(timeout, this.onTimeout)
+			this.timer = time.AfterFunc(this.sendTimeout, this.onTimeout)
 		}
 
 		if this.writeable && !this.doing {
@@ -398,10 +388,8 @@ func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 
 		var deadline time.Time
 
-		timeout := this.getRecvTimeout()
-
-		if 0 != timeout {
-			deadline = time.Now().Add(timeout)
+		if 0 != this.recvTimeout {
+			deadline = time.Now().Add(this.recvTimeout)
 		}
 
 		if err := this.r.add(aioContext{
@@ -418,7 +406,7 @@ func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 		}
 
 		if !deadline.IsZero() && nil == this.timer {
-			this.timer = time.AfterFunc(timeout, this.onTimeout)
+			this.timer = time.AfterFunc(this.recvTimeout, this.onTimeout)
 		}
 
 		if this.readable && !this.doing {
@@ -623,11 +611,6 @@ func (this *AIOConn) do() {
 			return
 		} else {
 
-			if nil != this.doTimeout && this.timer == this.doTimeout {
-				this.doTimeout = nil
-				this.processTimeout()
-			}
-
 			if this.canRead() {
 				this.doRead()
 			}
@@ -636,7 +619,12 @@ func (this *AIOConn) do() {
 				this.doWrite()
 			}
 
-			if !(this.closed || this.canRead() || this.canWrite() || nil != this.doTimeout && this.timer == this.doTimeout) {
+			if nil != this.doTimeout && this.timer == this.doTimeout {
+				this.doTimeout = nil
+				this.processTimeout()
+			}
+
+			if !(this.closed || this.canRead() || this.canWrite()) {
 				break
 			}
 		}
@@ -815,7 +803,6 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 }
 
 func (this *AIOService) postCompleteStatus(c *AIOConn, buff [][]byte, bytestransfer int, err error, context interface{}) {
-	c.connMgr.subIO(c)
 	this.completeQueue <- AIOResult{
 		Conn:          c,
 		Context:       context,
@@ -823,14 +810,11 @@ func (this *AIOService) postCompleteStatus(c *AIOConn, buff [][]byte, bytestrans
 		Buffs:         buff,
 		Bytestransfer: bytestransfer,
 	}
+	c.connMgr.subIO(c)
 }
 
-func (this *AIOService) GetCompleteStatus() (r AIOResult, err error) {
-	ok := false
+func (this *AIOService) GetCompleteStatus() (r AIOResult, ok bool) {
 	r, ok = <-this.completeQueue
-	if !ok {
-		err = ErrServiceClosed
-	}
 	return
 }
 
@@ -864,7 +848,7 @@ func Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
 	return defalutService.Bind(conn, option)
 }
 
-func GetCompleteStatus() (AIOResult, error) {
+func GetCompleteStatus() (AIOResult, bool) {
 	createOnce.Do(func() {
 		defalutService = NewAIOService(DefaultWorkerCount)
 	})

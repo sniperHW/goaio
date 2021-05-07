@@ -74,8 +74,8 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 
 	go func() {
 		for {
-			res, err := w.GetCompleteStatus()
-			if nil != err {
+			res, ok := w.GetCompleteStatus()
+			if !ok {
 				break
 			} else {
 				if res.Err != nil {
@@ -156,8 +156,8 @@ func TestDefault(t *testing.T) {
 	c.Send('w', wx)
 
 	for {
-		res, err := GetCompleteStatus()
-		if nil != err {
+		res, ok := GetCompleteStatus()
+		if !ok {
 			break
 		} else if nil == res.Err {
 			if res.Context.(rune) == 'w' {
@@ -213,8 +213,8 @@ func TestSendEmptyBuff(t *testing.T) {
 
 	go func() {
 		for {
-			res, err := GetCompleteStatus()
-			if nil != err {
+			res, ok := GetCompleteStatus()
+			if !ok {
 				break
 			} else if nil != res.Err {
 				assert.Equal(t, res.Err, ErrEmptyBuff)
@@ -280,8 +280,8 @@ func TestBusySend(t *testing.T) {
 
 	go func() {
 		for {
-			res, err := GetCompleteStatus()
-			if nil != err {
+			res, ok := GetCompleteStatus()
+			if !ok {
 				break
 			} else if nil != res.Err {
 				break
@@ -338,8 +338,8 @@ func TestRecvUseEmptyBuff(t *testing.T) {
 
 	go func() {
 		for {
-			res, err := w.GetCompleteStatus()
-			if nil != err {
+			res, ok := w.GetCompleteStatus()
+			if !ok {
 				break
 			} else {
 				if res.Err != nil {
@@ -411,8 +411,8 @@ func TestRecvMutilBuff(t *testing.T) {
 
 	go func() {
 		for {
-			res, err := w.GetCompleteStatus()
-			if nil != err {
+			res, ok := w.GetCompleteStatus()
+			if !ok {
 				break
 			} else {
 				if res.Err != nil {
@@ -495,8 +495,8 @@ func TestSendMutilBuff(t *testing.T) {
 	recved := 0
 
 	for {
-		res, err := GetCompleteStatus()
-		if nil != err {
+		res, ok := GetCompleteStatus()
+		if !ok {
 			break
 		} else if nil == res.Err {
 			if res.Context.(rune) == 'w' {
@@ -622,8 +622,8 @@ func TestSendBigBuff(t *testing.T) {
 	defer c.Close(ErrActiveClose)
 
 	for {
-		res, err := w.GetCompleteStatus()
-		if nil == err {
+		res, ok := w.GetCompleteStatus()
+		if !ok {
 			break
 		} else if nil == res.Err {
 			if res.Context.(rune) == 'w' {
@@ -672,8 +672,8 @@ func TestShareBuffer(t *testing.T) {
 	count := 0
 
 	for {
-		res, err := w.GetCompleteStatus()
-		if nil != err {
+		res, ok := w.GetCompleteStatus()
+		if !ok {
 			break
 		} else if nil == res.Err {
 			if res.Context.(rune) == 'w' {
@@ -846,8 +846,8 @@ func TestRecvTimeout1(t *testing.T) {
 	count := 0
 
 	for {
-		res, err := w.GetCompleteStatus()
-		if nil != err {
+		res, ok := w.GetCompleteStatus()
+		if !ok {
 			break
 		} else if nil != res.Err {
 			assert.Equal(t, res.Err, ErrRecvTimeout)
@@ -917,8 +917,8 @@ func TestRecvTimeout2(t *testing.T) {
 
 	go func() {
 		for {
-			res, err := w.GetCompleteStatus()
-			if nil != err {
+			res, ok := w.GetCompleteStatus()
+			if !ok {
 				break
 			} else if nil != res.Err {
 				if res.Err == ErrServiceClosed {
@@ -989,8 +989,8 @@ func TestRecvTimeout3(t *testing.T) {
 
 	go func() {
 		for {
-			res, err := w.GetCompleteStatus()
-			if nil != err {
+			res, ok := w.GetCompleteStatus()
+			if !ok {
 				break
 			} else if nil != res.Err {
 				if res.Err == ErrServiceClosed {
@@ -1066,8 +1066,8 @@ func TestSendTimeout1(t *testing.T) {
 	c.Send('w', wx)
 
 	for {
-		res, err := w.GetCompleteStatus()
-		if nil != err {
+		res, ok := w.GetCompleteStatus()
+		if !ok {
 			break
 		} else if nil != res.Err {
 			if res.Err != ErrSendTimeout {
@@ -1138,8 +1138,8 @@ func TestSendTimeout2(t *testing.T) {
 
 	go func() {
 		for {
-			res, err := w.GetCompleteStatus()
-			if nil != err {
+			res, ok := w.GetCompleteStatus()
+			if !ok {
 				break
 			} else if nil != res.Err {
 				assert.Equal(t, ErrCloseServiceClosed, res.Err)
@@ -1212,8 +1212,8 @@ func TestSendTimeout3(t *testing.T) {
 	c.SetSendTimeout(time.Second)
 
 	for {
-		res, err := w.GetCompleteStatus()
-		if nil != err {
+		res, ok := w.GetCompleteStatus()
+		if !ok {
 			break
 		} else if nil != res.Err {
 			assert.Equal(t, ErrSendTimeout, res.Err)
@@ -1399,8 +1399,8 @@ func testParallel(t *testing.T, par int, msgsize int) {
 	go func() {
 
 		for {
-			res, err := w.GetCompleteStatus()
-			if nil != err {
+			res, ok := w.GetCompleteStatus()
+			if !ok {
 				break
 			} else {
 				if nil != res.Err {
@@ -1506,8 +1506,8 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 	target := bufsize * b.N * numconn
 
 	for {
-		res, err := w.GetCompleteStatus()
-		if nil != err {
+		res, ok := w.GetCompleteStatus()
+		if !ok {
 			break
 		} else if nil != res.Err {
 			res.Conn.Close(res.Err)
