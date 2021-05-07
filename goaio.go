@@ -325,9 +325,7 @@ func (this *AIOConn) Close(reason error) {
 		}
 		if !this.doing {
 			this.doing = true
-			if nil != this.service.pushIOTask(this) {
-				this.rawconn.Close()
-			}
+			this.service.pushIOTask(this)
 		}
 	})
 }
@@ -441,10 +439,6 @@ func (this *AIOConn) canWrite() bool {
 }
 
 func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
-	if atomic.LoadInt32(this.service.closed) == 1 {
-		return ErrServiceClosed
-	}
-
 	this.Lock()
 	defer this.Unlock()
 
@@ -487,10 +481,6 @@ func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
 }
 
 func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
-	if atomic.LoadInt32(this.service.closed) == 1 {
-		return ErrServiceClosed
-	}
-
 	this.Lock()
 	defer this.Unlock()
 
@@ -733,7 +723,7 @@ func (this *AIOConn) do() {
 				this.doWrite()
 			}
 
-			if !(this.closed || this.canRead() || this.canWrite()) {
+			if !(this.closed || this.canRead() || this.canWrite() || nil != this.doTimeout && this.timer == this.doTimeout) {
 				break
 			}
 		}
@@ -909,8 +899,8 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 	}
 }
 
-func (this *AIOService) pushIOTask(c *AIOConn) error {
-	return this.tq[c.tqIdx].Push(c)
+func (this *AIOService) pushIOTask(c *AIOConn) {
+	this.tq[c.tqIdx].Push(c)
 }
 
 func (this *AIOService) postCompleteStatus(c *AIOConn, buff [][]byte, bytestransfer int, err error, context interface{}) {
