@@ -116,8 +116,8 @@ type AIOConn struct {
 
 type AIOService struct {
 	sync.Mutex
-	completeQueue *completetionQueue
-	tq            []*TaskQueue
+	completeQueue chan AIOResult
+	tq            []chan *AIOConn
 	poller        pollerI
 	closed        *int32
 	waitgroup     *sync.WaitGroup
@@ -209,99 +209,6 @@ func (this *aioContextQueue) packIovec(iovec *[MaxIovecSize]syscall.Iovec) (int,
 		}
 		return cc, total
 	}
-}
-
-func newCompletetionQueue() *completetionQueue {
-	q := &completetionQueue{
-		queue: make([]AIOResult, 1024+1),
-	}
-	q.cond = sync.NewCond(&q.mu)
-	return q
-}
-
-func (this *completetionQueue) close() {
-	this.mu.Lock()
-	this.closed = true
-	this.mu.Unlock()
-	this.cond.Broadcast()
-}
-
-func (this *completetionQueue) empty() bool {
-	return this.head == this.tail
-}
-
-func (this *completetionQueue) grow() {
-	queue := make([]AIOResult, len(this.queue)*2-1, len(this.queue)*2-1)
-	i := 0
-	for !this.empty() {
-		queue[i] = this.pop()
-		i++
-	}
-	this.queue = queue
-	this.head = 0
-	this.tail = i
-}
-
-func (this *completetionQueue) pop() AIOResult {
-	if this.head == this.tail {
-		panic("empty")
-	}
-	head := this.queue[this.head]
-	this.queue[this.head] = AIOResult{}
-	this.head = (this.head + 1) % len(this.queue)
-	return head
-}
-
-func (this *completetionQueue) push(r *AIOResult) {
-	if (this.tail+1)%len(this.queue) != this.head {
-		this.queue[this.tail] = *r
-		this.tail = (this.tail + 1) % len(this.queue)
-	} else {
-		this.grow()
-		this.push(r)
-	}
-}
-
-func (this *completetionQueue) postCompleteStatus(c *AIOConn, buffs [][]byte, bytestransfer int, err error, context interface{}) {
-	this.mu.Lock()
-	if this.closed {
-		this.mu.Unlock()
-	} else {
-		this.push(&AIOResult{
-			Conn:          c,
-			Context:       context,
-			Err:           err,
-			Buffs:         buffs,
-			Bytestransfer: bytestransfer,
-		})
-
-		waitCount := this.waitCount
-
-		this.mu.Unlock()
-
-		if waitCount > 0 {
-			this.cond.Signal()
-		}
-	}
-}
-
-func (this *completetionQueue) getCompleteStatus() (res AIOResult, err error) {
-	this.mu.Lock()
-
-	for this.empty() {
-		if this.closed {
-			err = ErrServiceClosed
-			this.mu.Unlock()
-			return
-		}
-		this.waitCount++
-		this.cond.Wait()
-		this.waitCount--
-	}
-
-	res = this.pop()
-	this.mu.Unlock()
-	return
 }
 
 func (this *AIOConn) GetUserData() interface{} {
@@ -790,7 +697,7 @@ func NewAIOService(worker int) *AIOService {
 	if poller, err := openPoller(); nil == err {
 		waitgroup := &sync.WaitGroup{}
 		s := &AIOService{}
-		s.completeQueue = newCompletetionQueue()
+		s.completeQueue = make(chan AIOResult, 65535)
 		s.poller = poller
 		s.connMgr = make([]*connMgr, 251)
 		s.waitgroup = waitgroup
@@ -806,21 +713,17 @@ func NewAIOService(worker int) *AIOService {
 		}
 
 		for i := 0; i < worker; i++ {
-			tq := NewTaskQueue()
+			tq := make(chan *AIOConn, 4096)
 			s.tq = append(s.tq, tq)
 			go func() {
 				waitgroup.Add(1)
 				defer waitgroup.Done()
-				var err error
-				queue := make([]interface{}, 0, 512)
 				for {
-					queue, err = tq.Pop(queue)
-					if nil != err {
+					v, ok := <-tq
+					if !ok {
 						return
 					} else {
-						for _, v := range queue {
-							v.(*AIOConn).do()
-						}
+						v.do()
 					}
 				}
 			}()
@@ -905,16 +808,27 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 }
 
 func (this *AIOService) pushIOTask(c *AIOConn) {
-	this.tq[c.tqIdx].Push(c)
+	this.tq[c.tqIdx] <- c
 }
 
 func (this *AIOService) postCompleteStatus(c *AIOConn, buff [][]byte, bytestransfer int, err error, context interface{}) {
 	this.subIO(c)
-	this.completeQueue.postCompleteStatus(c, buff, bytestransfer, err, context)
+	this.completeQueue <- AIOResult{
+		Conn:          c,
+		Context:       context,
+		Err:           err,
+		Buffs:         buff,
+		Bytestransfer: bytestransfer,
+	}
 }
 
-func (this *AIOService) GetCompleteStatus() (AIOResult, error) {
-	return this.completeQueue.getCompleteStatus()
+func (this *AIOService) GetCompleteStatus() (r AIOResult, err error) {
+	ok := false
+	r, ok = <-this.completeQueue
+	if !ok {
+		err = ErrServiceClosed
+	}
+	return
 }
 
 func (this *AIOService) Close() {
@@ -929,14 +843,14 @@ func (this *AIOService) Close() {
 		}
 
 		for _, v := range this.tq {
-			v.Close()
+			close(v)
 		}
 
 		//等待worker处理完所有的AIOConn清理
 		this.waitgroup.Wait()
 
 		//所有的待处理的AIO在此时已经被投递到completeQueue，可以关闭completeQueue。
-		this.completeQueue.close()
+		close(this.completeQueue)
 	})
 }
 
