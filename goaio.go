@@ -546,7 +546,9 @@ func (this *AIOConn) onActive(ev int) {
 func (this *AIOConn) doRead() {
 	c := this.r.front()
 	ver := this.readableVer
+
 	this.Unlock()
+
 	userShareBuffer := false
 	var sharebuff []byte
 	var cc int
@@ -574,6 +576,7 @@ func (this *AIOConn) doRead() {
 
 	r, _, e = syscall.Syscall(syscall.SYS_READV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.recv_iovec[0])), uintptr(cc))
 	size := int(r)
+
 	this.Lock()
 
 	if e == syscall.EINTR {
@@ -633,6 +636,7 @@ func (this *AIOConn) doWrite() {
 
 	ver := this.writeableVer
 	this.Unlock()
+
 	var (
 		r uintptr
 		e syscall.Errno
@@ -640,6 +644,7 @@ func (this *AIOConn) doWrite() {
 
 	r, _, e = syscall.Syscall(syscall.SYS_WRITEV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.send_iovec[0])), uintptr(cc))
 	size := int(r)
+
 	this.Lock()
 
 	if e == syscall.EINTR {
