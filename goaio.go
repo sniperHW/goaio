@@ -693,9 +693,7 @@ func (this *AIOConn) doWrite() {
 		if c.index >= len(c.buffs) {
 			this.service.postCompleteStatus(this, c.buffs, c.transfered, nil, c.context)
 			this.w.popFront()
-		}
-
-		if size < total && ver == this.writeableVer {
+		} else if ver == this.writeableVer {
 			this.writeable = false
 			this.service.poller.enableWrite(this)
 		}
@@ -714,7 +712,7 @@ func (this *AIOConn) do() {
 			}
 			for !this.w.empty() {
 				c := this.w.front()
-				this.service.postCompleteStatus(this, c.buffs, c.offset, this.reason, c.context)
+				this.service.postCompleteStatus(this, c.buffs, c.transfered, this.reason, c.context)
 				this.w.popFront()
 			}
 			this.service.unwatch(this)

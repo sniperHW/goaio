@@ -1439,7 +1439,7 @@ func BenchmarkEcho64K(b *testing.B) {
 }
 
 func BenchmarkEcho128K(b *testing.B) {
-	benchmarkEcho(b, 128*1024, 1)
+	benchmarkEcho(b, 128*1024, 64)
 }
 
 /*
