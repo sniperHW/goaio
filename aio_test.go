@@ -1516,9 +1516,9 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 			if count >= target {
 				break
 			}
-			res.Conn.Send('w', res.Buffs[0][:res.Bytestransfer])
-		} else {
 			res.Conn.Recv('r', res.Buffs[0][:cap(res.Buffs[0])])
+		} else {
+			res.Conn.Send('w', res.Buffs[0])
 		}
 
 	}
