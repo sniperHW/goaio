@@ -106,12 +106,13 @@ type AIOConn struct {
 	sharebuff     ShareBuffer
 	userData      interface{}
 	doTimeout     *time.Timer
-	tqIdx         int
 	pprev         *AIOConn
 	nnext         *AIOConn
 	ioCount       int
 	send_iovec    [MaxIovecSize]syscall.Iovec
 	recv_iovec    [MaxIovecSize]syscall.Iovec
+	connMgr       *connMgr
+	tq            chan *AIOConn
 }
 
 type AIOService struct {
@@ -232,7 +233,7 @@ func (this *AIOConn) Close(reason error) {
 		}
 		if !this.doing {
 			this.doing = true
-			this.service.pushIOTask(this)
+			this.tq <- this
 		}
 	})
 }
@@ -285,7 +286,7 @@ func (this *AIOConn) onTimeout() {
 	this.doTimeout = this.timer
 	if nil != this.doTimeout && !this.doing {
 		this.doing = true
-		this.service.pushIOTask(this)
+		this.tq <- this
 	}
 }
 
@@ -369,7 +370,7 @@ func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
 			return err
 		}
 
-		if !this.service.addIO(this) {
+		if !this.connMgr.addIO(this) {
 			this.w.dropLast()
 			return ErrServiceClosed
 		}
@@ -380,7 +381,7 @@ func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
 
 		if this.writeable && !this.doing {
 			this.doing = true
-			this.service.pushIOTask(this)
+			this.tq <- this
 		}
 
 		return nil
@@ -411,7 +412,7 @@ func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 			return err
 		}
 
-		if !this.service.addIO(this) {
+		if !this.connMgr.addIO(this) {
 			this.r.dropLast()
 			return ErrServiceClosed
 		}
@@ -422,7 +423,7 @@ func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 
 		if this.readable && !this.doing {
 			this.doing = true
-			this.service.pushIOTask(this)
+			this.tq <- this
 		}
 
 		return nil
@@ -446,7 +447,7 @@ func (this *AIOConn) onActive(ev int) {
 
 	if (this.canRead() || this.canWrite()) && !this.doing {
 		this.doing = true
-		this.service.pushIOTask(this)
+		this.tq <- this
 	}
 }
 
@@ -680,17 +681,31 @@ func (this *connMgr) subIO(c *AIOConn) {
 
 func (this *connMgr) close() {
 	this.Lock()
+	this.closed = true
 	conns := []*AIOConn{}
 	n := this.head.nnext
 	for ; n != &this.head; n = n.nnext {
 		conns = append(conns, n)
 	}
-	this.head.nnext = &this.head
 	this.Unlock()
 
 	for _, v := range conns {
 		v.Close(ErrCloseServiceClosed)
 	}
+
+	for !func() bool {
+		this.Lock()
+		defer this.Unlock()
+		if this.head.nnext == &this.head {
+			return true
+		} else {
+			return false
+		}
+
+	}() {
+		runtime.Gosched()
+	}
+
 }
 
 func NewAIOService(worker int) *AIOService {
@@ -745,14 +760,6 @@ func (this *AIOService) unwatch(c *AIOConn) {
 	this.poller.unwatch(c)
 }
 
-func (this *AIOService) addIO(c *AIOConn) bool {
-	return this.connMgr[c.fd%len(this.connMgr)].addIO(c)
-}
-
-func (this *AIOService) subIO(c *AIOConn) {
-	this.connMgr[c.fd%len(this.connMgr)].subIO(c)
-}
-
 func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
 
 	this.Lock()
@@ -793,8 +800,8 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 		r:         newAioContextQueue(option.RecvqueSize),
 		w:         newAioContextQueue(option.SendqueSize),
 		userData:  option.UserData,
-		//todo:根据各tq的负载情况动态调整tqIdx以平衡worker线程的工作负载
-		tqIdx: fd % len(this.tq),
+		tq:        this.tq[fd%len(this.tq)],
+		connMgr:   this.connMgr[fd%len(this.connMgr)],
 	}
 
 	if this.poller.watch(cc) {
@@ -807,12 +814,8 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 	}
 }
 
-func (this *AIOService) pushIOTask(c *AIOConn) {
-	this.tq[c.tqIdx] <- c
-}
-
 func (this *AIOService) postCompleteStatus(c *AIOConn, buff [][]byte, bytestransfer int, err error, context interface{}) {
-	this.subIO(c)
+	c.connMgr.subIO(c)
 	this.completeQueue <- AIOResult{
 		Conn:          c,
 		Context:       context,

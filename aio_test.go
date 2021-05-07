@@ -1161,8 +1161,8 @@ func TestSendTimeout2(t *testing.T) {
 		v.Close()
 	}
 
-	assert.Equal(t, ErrServiceClosed, c.Send(nil, wx))
-	assert.Equal(t, ErrServiceClosed, c.Recv(nil, wx))
+	assert.Equal(t, ErrConnClosed, c.Send(nil, wx))
+	assert.Equal(t, ErrConnClosed, c.Recv(nil, wx))
 
 }
 
