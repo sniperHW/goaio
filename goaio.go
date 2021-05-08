@@ -470,7 +470,7 @@ func (this *AIOConn) doRead() {
 		e syscall.Errno
 	)
 
-	r, _, e = syscall.Syscall(syscall.SYS_READV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.recv_iovec[0])), uintptr(cc))
+	r, _, e = syscall.RawSyscall(syscall.SYS_READV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.recv_iovec[0])), uintptr(cc))
 	size := int(r)
 
 	this.Lock()
@@ -538,7 +538,7 @@ func (this *AIOConn) doWrite() {
 		e syscall.Errno
 	)
 
-	r, _, e = syscall.Syscall(syscall.SYS_WRITEV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.send_iovec[0])), uintptr(cc))
+	r, _, e = syscall.RawSyscall(syscall.SYS_WRITEV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.send_iovec[0])), uintptr(cc))
 	size := int(r)
 
 	this.Lock()
