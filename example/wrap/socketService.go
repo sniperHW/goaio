@@ -58,8 +58,8 @@ type SocketService struct {
 
 func (this *SocketService) completeRoutine(s *goaio.AIOService) {
 	for {
-		res, err := s.GetCompleteStatus()
-		if nil != err {
+		res, ok := s.GetCompleteStatus()
+		if !ok {
 			break
 		} else {
 			context := res.Context.(*ioContext)

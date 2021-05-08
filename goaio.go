@@ -38,8 +38,8 @@ var (
 	CompleteQueueSize   = 65535
 	TaskQueueSize       = 65535
 	ConnMgrSize         = 263
-	DefaultRecvBuffSize = 4096
 	DefaultWorkerCount  = 1
+	DefaultRecvBuffSize = 4096
 )
 
 type ShareBuffer interface {
@@ -88,40 +88,44 @@ type completetionQueue struct {
 }
 
 type AIOConn struct {
-	sync.Mutex
 	fd            int
 	rawconn       net.Conn
+	muR           sync.Mutex
+	muW           sync.Mutex
 	readable      bool
 	readableVer   int
 	writeable     bool
 	writeableVer  int
 	w             *aioContextQueue
 	r             *aioContextQueue
+	doingW        bool
+	doingR        bool
+	rtimer        *time.Timer
+	dorTimer      *time.Timer
+	wtimer        *time.Timer
+	dowTimer      *time.Timer
 	service       *AIOService
-	doing         bool
-	closed        bool
+	closed        int32
 	pollerVersion int32
 	closeOnce     sync.Once
 	sendTimeout   time.Duration
 	recvTimeout   time.Duration
-	timer         *time.Timer
 	reason        error
 	sharebuff     ShareBuffer
 	userData      interface{}
-	doTimeout     *time.Timer
 	pprev         *AIOConn
 	nnext         *AIOConn
 	ioCount       int
 	send_iovec    [MaxIovecSize]syscall.Iovec
 	recv_iovec    [MaxIovecSize]syscall.Iovec
 	connMgr       *connMgr
-	tq            chan *AIOConn
+	tq            chan func()
 }
 
 type AIOService struct {
 	sync.Mutex
 	completeQueue chan AIOResult
-	tq            chan *AIOConn
+	tq            chan func()
 	poller        pollerI
 	closed        int32
 	waitgroup     *sync.WaitGroup
@@ -222,30 +226,46 @@ func (this *AIOConn) GetUserData() interface{} {
 func (this *AIOConn) Close(reason error) {
 	this.closeOnce.Do(func() {
 		runtime.SetFinalizer(this, nil)
-		this.Lock()
-		defer this.Unlock()
-		this.closed = true
+
 		if nil == reason {
 			reason = ErrCloseNone
 		}
 		this.reason = reason
 
-		if nil != this.timer {
-			this.timer.Stop()
-			this.timer = nil
+		atomic.StoreInt32(&this.closed, 1)
+
+		this.muR.Lock()
+		if nil != this.rtimer {
+			this.rtimer.Stop()
+			this.rtimer = nil
 		}
 
-		if !this.doing {
-			this.doing = true
-			this.tq <- this
+		if !this.doingR {
+			this.doingR = true
+			this.tq <- this.doRead
 		}
+		this.muR.Unlock()
+
+		this.muW.Lock()
+		if nil != this.wtimer {
+			this.wtimer.Stop()
+			this.wtimer = nil
+		}
+
+		if !this.doingW {
+			this.doingW = true
+			this.tq <- this.doWrite
+		}
+		this.muW.Unlock()
 
 		this.service.unwatch(this)
+
 		this.rawconn.Close()
+
 	})
 }
 
-func (this *AIOConn) processTimeout() {
+func (this *AIOConn) processReadTimeout() {
 	now := time.Now()
 	if this.recvTimeout > 0 {
 		for !this.r.empty() {
@@ -258,6 +278,22 @@ func (this *AIOConn) processTimeout() {
 			}
 		}
 	}
+
+	var deadline time.Time
+
+	if this.recvTimeout > 0 && !this.r.empty() && this.r.front().deadline.After(deadline) {
+		deadline = this.r.front().deadline
+	}
+
+	if !deadline.IsZero() {
+		this.rtimer = time.AfterFunc(now.Sub(deadline), this.onReadTimeout)
+	} else {
+		this.rtimer = nil
+	}
+}
+
+func (this *AIOConn) processWriteTimeout() {
+	now := time.Now()
 
 	if this.sendTimeout > 0 {
 		for !this.w.empty() {
@@ -272,44 +308,52 @@ func (this *AIOConn) processTimeout() {
 	}
 
 	var deadline time.Time
-	if this.recvTimeout > 0 && !this.r.empty() && this.r.front().deadline.After(deadline) {
-		deadline = this.r.front().deadline
-	}
 
 	if this.sendTimeout > 0 && !this.w.empty() && this.w.front().deadline.After(deadline) {
 		deadline = this.w.front().deadline
 	}
 
 	if !deadline.IsZero() {
-		this.timer = time.AfterFunc(now.Sub(deadline), this.onTimeout)
+		this.wtimer = time.AfterFunc(now.Sub(deadline), this.onWriteTimeout)
 	} else {
-		this.timer = nil
+		this.wtimer = nil
+	}
+
+}
+
+func (this *AIOConn) onReadTimeout() {
+	this.muR.Lock()
+	defer this.muR.Unlock()
+	this.dorTimer = this.rtimer
+	if nil != this.dorTimer && !this.doingR {
+		this.doingR = true
+		this.tq <- this.doRead
 	}
 }
 
-func (this *AIOConn) onTimeout() {
-	this.Lock()
-	defer this.Unlock()
-	this.doTimeout = this.timer
-	if nil != this.doTimeout && !this.doing {
-		this.doing = true
-		this.tq <- this
+func (this *AIOConn) onWriteTimeout() {
+	this.muW.Lock()
+	defer this.muW.Unlock()
+	this.dowTimer = this.wtimer
+	if nil != this.dowTimer && !this.doingW {
+		this.doingW = true
+		this.tq <- this.doWrite
 	}
 }
 
 func (this *AIOConn) SetRecvTimeout(timeout time.Duration) {
-	this.Lock()
-	defer this.Unlock()
-	if !this.closed {
-		if nil != this.timer {
-			this.timer.Stop()
-			this.timer = nil
+	this.muR.Lock()
+	defer this.muR.Unlock()
+	if atomic.LoadInt32(&this.closed) == 0 {
+		if nil != this.rtimer {
+			this.rtimer.Stop()
+			this.rtimer = nil
 		}
 		this.recvTimeout = timeout
 		if timeout != 0 {
 			deadline := time.Now().Add(timeout)
 			if this.r.setDeadline(deadline) {
-				this.timer = time.AfterFunc(timeout, this.onTimeout)
+				this.rtimer = time.AfterFunc(timeout, this.onReadTimeout)
 			}
 		} else {
 			this.r.setDeadline(time.Time{})
@@ -318,18 +362,18 @@ func (this *AIOConn) SetRecvTimeout(timeout time.Duration) {
 }
 
 func (this *AIOConn) SetSendTimeout(timeout time.Duration) {
-	this.Lock()
-	defer this.Unlock()
-	if !this.closed {
-		if nil != this.timer {
-			this.timer.Stop()
-			this.timer = nil
+	this.muW.Lock()
+	defer this.muW.Unlock()
+	if atomic.LoadInt32(&this.closed) == 0 {
+		if nil != this.wtimer {
+			this.wtimer.Stop()
+			this.wtimer = nil
 		}
 		this.sendTimeout = timeout
 		if timeout != 0 {
 			deadline := time.Now().Add(timeout)
 			if this.w.setDeadline(deadline) {
-				this.timer = time.AfterFunc(timeout, this.onTimeout)
+				this.wtimer = time.AfterFunc(timeout, this.onWriteTimeout)
 			}
 		} else {
 			this.w.setDeadline(time.Time{})
@@ -337,300 +381,312 @@ func (this *AIOConn) SetSendTimeout(timeout time.Duration) {
 	}
 }
 
-func (this *AIOConn) canRead() bool {
-	return this.readable && !this.r.empty()
-}
-
-func (this *AIOConn) canWrite() bool {
-	return this.writeable && !this.w.empty()
-}
-
 func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
-	this.Lock()
-	defer this.Unlock()
 
-	if this.closed {
-		return ErrConnClosed
-	} else {
+	var deadline time.Time
 
-		var deadline time.Time
-
-		if 0 != this.sendTimeout {
-			deadline = time.Now().Add(this.sendTimeout)
-		}
-
-		if err := this.w.add(aioContext{
-			buffs:    buffs,
-			context:  context,
-			deadline: deadline,
-		}); nil != err {
-			return err
-		}
-
-		if !this.connMgr.addIO(this) {
-			this.w.dropLast()
-			return ErrServiceClosed
-		}
-
-		if !deadline.IsZero() && nil == this.timer {
-			this.timer = time.AfterFunc(this.sendTimeout, this.onTimeout)
-		}
-
-		if this.writeable && !this.doing {
-			this.doing = true
-			this.tq <- this
-		}
-
-		return nil
+	if 0 != this.sendTimeout {
+		deadline = time.Now().Add(this.sendTimeout)
 	}
+
+	this.muW.Lock()
+
+	if atomic.LoadInt32(&this.closed) == 1 {
+		this.muW.Unlock()
+		return ErrConnClosed
+	}
+
+	if err := this.w.add(aioContext{
+		buffs:    buffs,
+		context:  context,
+		deadline: deadline,
+	}); nil != err {
+		this.muW.Unlock()
+		return err
+	}
+
+	if !this.connMgr.addIO(this) {
+		this.w.dropLast()
+		this.muW.Unlock()
+		return ErrServiceClosed
+	}
+
+	if !deadline.IsZero() && nil == this.wtimer {
+		this.wtimer = time.AfterFunc(this.sendTimeout, this.onWriteTimeout)
+	}
+
+	if this.writeable && !this.doingW {
+		this.doingW = true
+		this.muW.Unlock()
+		this.tq <- this.doWrite
+	} else {
+		this.muW.Unlock()
+	}
+
+	return nil
+
 }
 
 func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
-	this.Lock()
-	defer this.Unlock()
 
-	if this.closed {
-		return ErrConnClosed
-	} else {
+	var deadline time.Time
 
-		var deadline time.Time
-
-		if 0 != this.recvTimeout {
-			deadline = time.Now().Add(this.recvTimeout)
-		}
-
-		if err := this.r.add(aioContext{
-			buffs:    buffs,
-			context:  context,
-			deadline: deadline,
-		}); nil != err {
-			return err
-		}
-
-		if !this.connMgr.addIO(this) {
-			this.r.dropLast()
-			return ErrServiceClosed
-		}
-
-		if !deadline.IsZero() && nil == this.timer {
-			this.timer = time.AfterFunc(this.recvTimeout, this.onTimeout)
-		}
-
-		if this.readable && !this.doing {
-			this.doing = true
-			this.tq <- this
-		}
-
-		return nil
+	if 0 != this.recvTimeout {
+		deadline = time.Now().Add(this.recvTimeout)
 	}
+
+	this.muR.Lock()
+
+	if atomic.LoadInt32(&this.closed) == 1 {
+		this.muR.Unlock()
+		return ErrConnClosed
+	}
+
+	if err := this.r.add(aioContext{
+		buffs:    buffs,
+		context:  context,
+		deadline: deadline,
+	}); nil != err {
+		this.muR.Unlock()
+		return err
+	}
+
+	if !this.connMgr.addIO(this) {
+		this.r.dropLast()
+		this.muR.Unlock()
+		return ErrServiceClosed
+	}
+
+	if !deadline.IsZero() && nil == this.rtimer {
+		this.rtimer = time.AfterFunc(this.recvTimeout, this.onReadTimeout)
+	}
+
+	if this.readable && !this.doingR {
+		this.doingR = true
+		this.muR.Unlock()
+		this.tq <- this.doRead
+	} else {
+		this.muR.Unlock()
+	}
+
+	return nil
+
 }
 
 func (this *AIOConn) onActive(ev int) {
 
-	this.Lock()
-	defer this.Unlock()
-
-	if this.closed {
+	if atomic.LoadInt32(&this.closed) == 1 {
 		return
 	}
 
 	if ev&EV_READ != 0 || ev&EV_ERROR != 0 {
+		this.muR.Lock()
 		this.readable = true
 		this.readableVer++
+		if !this.r.empty() && !this.doingR {
+			this.doingR = true
+			this.muR.Unlock()
+			this.tq <- this.doRead
+		} else {
+			this.muR.Unlock()
+		}
 	}
 
 	if ev&EV_WRITE != 0 || ev&EV_ERROR != 0 {
+		this.muW.Lock()
 		this.writeable = true
 		this.writeableVer++
-	}
-
-	if (this.canRead() || this.canWrite()) && !this.doing {
-		this.doing = true
-		this.tq <- this
+		if !this.w.empty() && !this.doingW {
+			this.doingW = true
+			this.muW.Unlock()
+			this.tq <- this.doWrite
+		} else {
+			this.muW.Unlock()
+		}
 	}
 }
 
 func (this *AIOConn) doRead() {
-	c := this.r.front()
-	ver := this.readableVer
 
-	this.Unlock()
+	this.muR.Lock()
 
-	userShareBuffer := false
-	var sharebuff []byte
-	var cc int
-	if len(c.buffs) == 0 {
-		if nil != this.sharebuff {
-			sharebuff = this.sharebuff.Acquire()
-			this.recv_iovec[0] = syscall.Iovec{&sharebuff[0], uint64(len(sharebuff))}
-			userShareBuffer = true
-			cc = 1
+	for atomic.LoadInt32(&this.closed) == 0 && this.readable && !this.r.empty() {
+
+		c := this.r.front()
+		ver := this.readableVer
+
+		this.muR.Unlock()
+
+		userShareBuffer := false
+		var sharebuff []byte
+		var cc int
+		if len(c.buffs) == 0 {
+			if nil != this.sharebuff {
+				sharebuff = this.sharebuff.Acquire()
+				this.recv_iovec[0] = syscall.Iovec{&sharebuff[0], uint64(len(sharebuff))}
+				userShareBuffer = true
+				cc = 1
+			} else {
+				c.buffs = append(c.buffs, make([]byte, DefaultRecvBuffSize))
+			}
+		}
+
+		if !userShareBuffer {
+			cc, _ = this.r.packIovec(&this.recv_iovec)
+		}
+
+		var (
+			r uintptr
+			e syscall.Errno
+		)
+
+		r, _, e = syscall.RawSyscall(syscall.SYS_READV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.recv_iovec[0])), uintptr(cc))
+		size := int(r)
+
+		this.muR.Lock()
+
+		if e == syscall.EINTR {
+			continue
+		} else if size == 0 || (e != 0 && e != syscall.EAGAIN) {
+
+			var err error
+			if size == 0 {
+				err = io.EOF
+			} else {
+				err = e
+			}
+
+			if userShareBuffer {
+				this.sharebuff.Release(sharebuff)
+			}
+
+			for !this.r.empty() {
+				c := this.r.front()
+				this.service.postCompleteStatus(this, c.buffs, 0, err, c.context)
+				this.r.popFront()
+			}
+
+		} else if e == syscall.EAGAIN {
+			if ver == this.readableVer {
+				this.readable = false
+			}
+
+			if userShareBuffer {
+				this.sharebuff.Release(sharebuff)
+			}
+
 		} else {
-			c.buffs = append(c.buffs, make([]byte, DefaultRecvBuffSize))
+
+			if userShareBuffer {
+				c.buffs = append(c.buffs, sharebuff)
+			}
+
+			this.service.postCompleteStatus(this, c.buffs, size, nil, c.context)
+			this.r.popFront()
+
 		}
 	}
 
-	if !userShareBuffer {
-		cc, _ = this.r.packIovec(&this.recv_iovec)
-	}
-
-	var (
-		r uintptr
-		e syscall.Errno
-	)
-
-	r, _, e = syscall.RawSyscall(syscall.SYS_READV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.recv_iovec[0])), uintptr(cc))
-	size := int(r)
-
-	this.Lock()
-
-	if e == syscall.EINTR {
-		return
-	} else if size == 0 || (e != 0 && e != syscall.EAGAIN) {
-
-		var err error
-		if size == 0 {
-			err = io.EOF
-		} else {
-			err = e
-		}
-
-		if userShareBuffer {
-			this.sharebuff.Release(sharebuff)
-		}
-
+	if atomic.LoadInt32(&this.closed) == 1 {
 		for !this.r.empty() {
 			c := this.r.front()
-			this.service.postCompleteStatus(this, c.buffs, 0, err, c.context)
+			this.service.postCompleteStatus(this, c.buffs, 0, this.reason, c.context)
 			this.r.popFront()
 		}
-
-	} else if e == syscall.EAGAIN {
-		if ver == this.readableVer {
-			this.readable = false
-		}
-
-		if userShareBuffer {
-			this.sharebuff.Release(sharebuff)
-		}
-
-	} else {
-
-		if userShareBuffer {
-			c.buffs = append(c.buffs, sharebuff)
-		}
-
-		this.service.postCompleteStatus(this, c.buffs, size, nil, c.context)
-		this.r.popFront()
-
+	} else if nil != this.dorTimer && this.rtimer == this.dorTimer {
+		this.dorTimer = nil
+		this.processReadTimeout()
 	}
+
+	this.doingR = false
+	this.muR.Unlock()
 }
 
 func (this *AIOConn) doWrite() {
-	cc, total := this.w.packIovec(&this.send_iovec)
-	if 0 == total {
-		c := this.w.front()
-		this.service.postCompleteStatus(this, c.buffs, c.transfered, ErrEmptyBuff, c.context)
-		this.w.popFront()
-		return
-	}
 
-	ver := this.writeableVer
-	this.Unlock()
+	this.muW.Lock()
 
-	var (
-		r uintptr
-		e syscall.Errno
-	)
+	for atomic.LoadInt32(&this.closed) == 0 && this.writeable && !this.w.empty() {
 
-	r, _, e = syscall.RawSyscall(syscall.SYS_WRITEV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.send_iovec[0])), uintptr(cc))
-	size := int(r)
-
-	this.Lock()
-
-	if e == syscall.EINTR {
-		return
-	} else if size == 0 || (e != 0 && e != syscall.EAGAIN) {
-
-		var err error
-		if size == 0 {
-			err = io.ErrUnexpectedEOF
-		} else {
-			err = e
-		}
-
-		for !this.w.empty() {
+		cc, total := this.w.packIovec(&this.send_iovec)
+		if 0 == total {
 			c := this.w.front()
-			this.service.postCompleteStatus(this, c.buffs, c.transfered, err, c.context)
+			this.service.postCompleteStatus(this, c.buffs, c.transfered, ErrEmptyBuff, c.context)
 			this.w.popFront()
+			continue
 		}
-	} else if e == syscall.EAGAIN {
-		if ver == this.writeableVer {
-			this.writeable = false
-			this.service.poller.enableWrite(this)
-		}
-	} else {
-		remain := size
-		c := this.w.front()
-		for remain > 0 {
-			s := len(c.buffs[c.index][c.offset:])
-			if remain >= s {
-				remain -= s
-				c.transfered += s
-				c.index++
-				c.offset = 0
+
+		ver := this.writeableVer
+		this.muW.Unlock()
+
+		var (
+			r uintptr
+			e syscall.Errno
+		)
+
+		r, _, e = syscall.RawSyscall(syscall.SYS_WRITEV, uintptr(this.fd), uintptr(unsafe.Pointer(&this.send_iovec[0])), uintptr(cc))
+		size := int(r)
+
+		this.muW.Lock()
+
+		if e == syscall.EINTR {
+			continue
+		} else if size == 0 || (e != 0 && e != syscall.EAGAIN) {
+
+			var err error
+			if size == 0 {
+				err = io.ErrUnexpectedEOF
 			} else {
-				c.offset += remain
-				c.transfered += remain
-				remain = 0
+				err = e
 			}
-		}
 
-		if c.index >= len(c.buffs) {
-			this.service.postCompleteStatus(this, c.buffs, c.transfered, nil, c.context)
-			this.w.popFront()
-		}
-	}
-}
-
-func (this *AIOConn) do() {
-	this.Lock()
-	defer this.Unlock()
-	for {
-		if this.closed {
-			for !this.r.empty() {
-				c := this.r.front()
-				this.service.postCompleteStatus(this, c.buffs, 0, this.reason, c.context)
-				this.r.popFront()
-			}
 			for !this.w.empty() {
 				c := this.w.front()
-				this.service.postCompleteStatus(this, c.buffs, c.transfered, this.reason, c.context)
+				this.service.postCompleteStatus(this, c.buffs, c.transfered, err, c.context)
 				this.w.popFront()
 			}
-			return
+		} else if e == syscall.EAGAIN {
+			if ver == this.writeableVer {
+				this.writeable = false
+				this.service.poller.enableWrite(this)
+			}
 		} else {
-
-			if this.canRead() {
-				this.doRead()
+			remain := size
+			c := this.w.front()
+			for remain > 0 {
+				s := len(c.buffs[c.index][c.offset:])
+				if remain >= s {
+					remain -= s
+					c.transfered += s
+					c.index++
+					c.offset = 0
+				} else {
+					c.offset += remain
+					c.transfered += remain
+					remain = 0
+				}
 			}
 
-			if this.canWrite() {
-				this.doWrite()
-			}
-
-			if nil != this.doTimeout && this.timer == this.doTimeout {
-				this.doTimeout = nil
-				this.processTimeout()
-			}
-
-			if !(this.closed || this.canRead() || this.canWrite()) {
-				break
+			if c.index >= len(c.buffs) {
+				this.service.postCompleteStatus(this, c.buffs, c.transfered, nil, c.context)
+				this.w.popFront()
 			}
 		}
 	}
 
-	this.doing = false
+	if atomic.LoadInt32(&this.closed) == 1 {
+		for !this.w.empty() {
+			c := this.w.front()
+			this.service.postCompleteStatus(this, c.buffs, c.transfered, this.reason, c.context)
+			this.w.popFront()
+		}
+	} else if nil != this.dowTimer && this.wtimer == this.dowTimer {
+		this.dowTimer = nil
+		this.processWriteTimeout()
+	}
+
+	this.doingW = false
+	this.muW.Unlock()
 }
 
 func (this *connMgr) addIO(c *AIOConn) bool {
@@ -704,7 +760,7 @@ func NewAIOService(worker int) *AIOService {
 		s.poller = poller
 		s.connMgr = make([]*connMgr, ConnMgrSize)
 		s.waitgroup = waitgroup
-		s.tq = make(chan *AIOConn, TaskQueueSize)
+		s.tq = make(chan func(), TaskQueueSize)
 		for k, _ := range s.connMgr {
 			m := &connMgr{}
 			m.head.nnext = &m.head
@@ -724,7 +780,7 @@ func NewAIOService(worker int) *AIOService {
 					if !ok {
 						return
 					} else {
-						v.do()
+						v()
 					}
 				}
 			}()
@@ -822,16 +878,15 @@ func (this *AIOService) Close() {
 		this.Lock()
 		defer this.Unlock()
 		atomic.StoreInt32(&this.closed, 1)
+
 		this.poller.close()
 		for _, v := range this.connMgr {
 			v.close()
 		}
 
 		close(this.tq)
-
 		//等待worker处理完所有的AIOConn清理
 		this.waitgroup.Wait()
-
 		//所有的待处理的AIO在此时已经被投递到completeQueue，可以关闭completeQueue。
 		close(this.completeQueue)
 	})
