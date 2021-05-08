@@ -33,14 +33,11 @@ const (
 	EV_ERROR = int(1 << 3)
 )
 
-const (
-	MaxIovecSize      = 64
-	CompleteQueueSize = 65535
-	TaskQueueSize     = 65535
-	ConnMgrSize       = 263
-)
-
 var (
+	MaxIovecSize       = 64
+	CompleteQueueSize  = 65535
+	TaskQueueSize      = 65535
+	ConnMgrSize        = 263
 	DefaultWorkerCount = 1
 )
 
