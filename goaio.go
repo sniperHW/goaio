@@ -382,92 +382,95 @@ func (this *AIOConn) SetSendTimeout(timeout time.Duration) {
 }
 
 func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
-	if atomic.LoadInt32(&this.closed) == 1 {
-		return ErrConnClosed
-	} else {
 
-		var deadline time.Time
+	var deadline time.Time
 
-		if 0 != this.sendTimeout {
-			deadline = time.Now().Add(this.sendTimeout)
-		}
-
-		this.muW.Lock()
-
-		if err := this.w.add(aioContext{
-			buffs:    buffs,
-			context:  context,
-			deadline: deadline,
-		}); nil != err {
-			this.muW.Unlock()
-			return err
-		}
-
-		if !this.connMgr.addIO(this) {
-			this.w.dropLast()
-			this.muW.Unlock()
-			return ErrServiceClosed
-		}
-
-		if !deadline.IsZero() && nil == this.wtimer {
-			this.wtimer = time.AfterFunc(this.sendTimeout, this.onWriteTimeout)
-		}
-
-		if this.writeable && !this.doingW {
-			this.doingW = true
-			this.muW.Unlock()
-			this.tq <- this.doWrite
-		} else {
-			this.muW.Unlock()
-		}
-
-		return nil
+	if 0 != this.sendTimeout {
+		deadline = time.Now().Add(this.sendTimeout)
 	}
+
+	this.muW.Lock()
+
+	if atomic.LoadInt32(&this.closed) == 1 {
+		this.muW.Unlock()
+		return ErrConnClosed
+	}
+
+	if err := this.w.add(aioContext{
+		buffs:    buffs,
+		context:  context,
+		deadline: deadline,
+	}); nil != err {
+		this.muW.Unlock()
+		return err
+	}
+
+	if !this.connMgr.addIO(this) {
+		this.w.dropLast()
+		this.muW.Unlock()
+		return ErrServiceClosed
+	}
+
+	if !deadline.IsZero() && nil == this.wtimer {
+		this.wtimer = time.AfterFunc(this.sendTimeout, this.onWriteTimeout)
+	}
+
+	if this.writeable && !this.doingW {
+		this.doingW = true
+		this.muW.Unlock()
+		this.tq <- this.doWrite
+	} else {
+		this.muW.Unlock()
+	}
+
+	return nil
+
 }
 
 func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 
-	if atomic.LoadInt32(&this.closed) == 1 {
-		return ErrConnClosed
-	} else {
+	var deadline time.Time
 
-		var deadline time.Time
-
-		if 0 != this.recvTimeout {
-			deadline = time.Now().Add(this.recvTimeout)
-		}
-
-		this.muR.Lock()
-
-		if err := this.r.add(aioContext{
-			buffs:    buffs,
-			context:  context,
-			deadline: deadline,
-		}); nil != err {
-			this.muR.Unlock()
-			return err
-		}
-
-		if !this.connMgr.addIO(this) {
-			this.r.dropLast()
-			this.muR.Unlock()
-			return ErrServiceClosed
-		}
-
-		if !deadline.IsZero() && nil == this.rtimer {
-			this.rtimer = time.AfterFunc(this.recvTimeout, this.onReadTimeout)
-		}
-
-		if this.readable && !this.doingR {
-			this.doingR = true
-			this.muR.Unlock()
-			this.tq <- this.doRead
-		} else {
-			this.muR.Unlock()
-		}
-
-		return nil
+	if 0 != this.recvTimeout {
+		deadline = time.Now().Add(this.recvTimeout)
 	}
+
+	this.muR.Lock()
+
+	if atomic.LoadInt32(&this.closed) == 1 {
+		this.muR.Unlock()
+		return ErrConnClosed
+	}
+
+	if err := this.r.add(aioContext{
+		buffs:    buffs,
+		context:  context,
+		deadline: deadline,
+	}); nil != err {
+		this.muR.Unlock()
+		return err
+	}
+
+	if !this.connMgr.addIO(this) {
+		this.r.dropLast()
+		this.muR.Unlock()
+		return ErrServiceClosed
+	}
+
+	if !deadline.IsZero() && nil == this.rtimer {
+		this.rtimer = time.AfterFunc(this.recvTimeout, this.onReadTimeout)
+	}
+
+	if this.readable && !this.doingR {
+		this.doingR = true
+		this.muR.Unlock()
+		this.tq <- this.doRead
+	} else {
+		this.muR.Unlock()
+	}
+
+	return nil
+
 }
 
 func (this *AIOConn) onActive(ev int) {
