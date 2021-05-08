@@ -28,15 +28,18 @@ var (
 )
 
 const (
-	EV_READ  = int(1 << 1)
-	EV_WRITE = int(1 << 2)
-	EV_ERROR = int(1 << 3)
+	EV_READ      = int(1 << 1)
+	EV_WRITE     = int(1 << 2)
+	EV_ERROR     = int(1 << 3)
+	MaxIovecSize = 64
 )
 
-const MaxIovecSize = 64
-
 var (
-	DefaultWorkerCount = 1
+	CompleteQueueSize   = 65535
+	TaskQueueSize       = 65535
+	ConnMgrSize         = 263
+	DefaultRecvBuffSize = 4096
+	DefaultWorkerCount  = 1
 )
 
 type ShareBuffer interface {
@@ -231,10 +234,14 @@ func (this *AIOConn) Close(reason error) {
 			this.timer.Stop()
 			this.timer = nil
 		}
+
 		if !this.doing {
 			this.doing = true
 			this.tq <- this
 		}
+
+		this.service.unwatch(this)
+		this.rawconn.Close()
 	})
 }
 
@@ -423,6 +430,10 @@ func (this *AIOConn) onActive(ev int) {
 	this.Lock()
 	defer this.Unlock()
 
+	if this.closed {
+		return
+	}
+
 	if ev&EV_READ != 0 || ev&EV_ERROR != 0 {
 		this.readable = true
 		this.readableVer++
@@ -448,21 +459,19 @@ func (this *AIOConn) doRead() {
 	userShareBuffer := false
 	var sharebuff []byte
 	var cc int
-	var total int
 	if len(c.buffs) == 0 {
 		if nil != this.sharebuff {
 			sharebuff = this.sharebuff.Acquire()
 			this.recv_iovec[0] = syscall.Iovec{&sharebuff[0], uint64(len(sharebuff))}
 			userShareBuffer = true
 			cc = 1
-			total = len(sharebuff)
 		} else {
-			c.buffs = append(c.buffs, make([]byte, 4096))
+			c.buffs = append(c.buffs, make([]byte, DefaultRecvBuffSize))
 		}
 	}
 
 	if !userShareBuffer {
-		cc, total = this.r.packIovec(&this.recv_iovec)
+		cc, _ = this.r.packIovec(&this.recv_iovec)
 	}
 
 	var (
@@ -513,10 +522,6 @@ func (this *AIOConn) doRead() {
 
 		this.service.postCompleteStatus(this, c.buffs, size, nil, c.context)
 		this.r.popFront()
-
-		if size < total && ver == this.readableVer {
-			this.readable = false
-		}
 
 	}
 }
@@ -584,9 +589,6 @@ func (this *AIOConn) doWrite() {
 		if c.index >= len(c.buffs) {
 			this.service.postCompleteStatus(this, c.buffs, c.transfered, nil, c.context)
 			this.w.popFront()
-		} else if ver == this.writeableVer {
-			this.writeable = false
-			this.service.poller.enableWrite(this)
 		}
 	}
 }
@@ -606,8 +608,6 @@ func (this *AIOConn) do() {
 				this.service.postCompleteStatus(this, c.buffs, c.transfered, this.reason, c.context)
 				this.w.popFront()
 			}
-			this.service.unwatch(this)
-			this.rawconn.Close()
 			return
 		} else {
 
@@ -700,11 +700,11 @@ func NewAIOService(worker int) *AIOService {
 	if poller, err := openPoller(); nil == err {
 		waitgroup := &sync.WaitGroup{}
 		s := &AIOService{}
-		s.completeQueue = make(chan AIOResult, 65535)
+		s.completeQueue = make(chan AIOResult, CompleteQueueSize)
 		s.poller = poller
-		s.connMgr = make([]*connMgr, 251)
+		s.connMgr = make([]*connMgr, ConnMgrSize)
 		s.waitgroup = waitgroup
-		s.tq = make(chan *AIOConn, 65535)
+		s.tq = make(chan *AIOConn, TaskQueueSize)
 		for k, _ := range s.connMgr {
 			m := &connMgr{}
 			m.head.nnext = &m.head
