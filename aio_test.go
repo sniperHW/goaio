@@ -161,6 +161,7 @@ func TestDefault(t *testing.T) {
 			break
 		} else if nil == res.Err {
 			if res.Context.(rune) == 'w' {
+				fmt.Println("here")
 				res.Conn.Close(ErrActiveClose)
 				break
 			}
