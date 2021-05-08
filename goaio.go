@@ -705,6 +705,11 @@ func (this *AIOConn) doRead() {
 
 				this.service.postCompleteStatus(this, c.buffs, size, nil, c.context)
 				this.r.popFront()
+
+				if size < total && ver == this.readableVer {
+					this.readable = false
+				}
+
 			}
 		}
 	}
@@ -792,6 +797,9 @@ func (this *AIOConn) doWrite() {
 			if c.index >= len(c.buffs) {
 				this.service.postCompleteStatus(this, c.buffs, c.transfered, nil, c.context)
 				this.w.popFront()
+			} else if ver == this.writeableVer {
+				this.writeable = false
+				this.service.poller.enableWrite(this)
 			}
 		}
 	}
