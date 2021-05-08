@@ -34,7 +34,7 @@ const (
 	MaxIovecSize = 64
 )
 
-var (
+const (
 	CompleteQueueSize   = 65535
 	TaskQueueSize       = 65535
 	ConnMgrSize         = 263
@@ -474,8 +474,8 @@ func (this *AIOConn) recv(context interface{}, readfull bool, buffs ...[]byte) e
 }
 
 func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
-	//return this.recv(context, false, buffs...)
-	var deadline time.Time
+	return this.recv(context, false, buffs...)
+	/*var deadline time.Time
 
 	if 0 != this.recvTimeout {
 		deadline = time.Now().Add(this.recvTimeout)
@@ -515,7 +515,7 @@ func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 		this.muR.Unlock()
 	}
 
-	return nil
+	return nil*/
 }
 
 func (this *AIOConn) RecvFull(context interface{}, buffs ...[]byte) error {
