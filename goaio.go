@@ -519,21 +519,19 @@ func (this *AIOConn) doRead() {
 		userShareBuffer := false
 		var sharebuff []byte
 		var cc int
-		var total int
 		if len(c.buffs) == 0 {
 			if nil != this.sharebuff {
 				sharebuff = this.sharebuff.Acquire()
 				this.recv_iovec[0] = syscall.Iovec{&sharebuff[0], uint64(len(sharebuff))}
 				userShareBuffer = true
 				cc = 1
-				total = len(sharebuff)
 			} else {
 				c.buffs = append(c.buffs, make([]byte, 4096))
 			}
 		}
 
 		if !userShareBuffer {
-			cc, total = this.r.packIovec(&this.recv_iovec)
+			cc, _ = this.r.packIovec(&this.recv_iovec)
 		}
 
 		var (
@@ -585,9 +583,6 @@ func (this *AIOConn) doRead() {
 			this.service.postCompleteStatus(this, c.buffs, size, nil, c.context)
 			this.r.popFront()
 
-			if size < total && ver == this.readableVer {
-				this.readable = false
-			}
 		}
 	}
 
@@ -674,9 +669,6 @@ func (this *AIOConn) doWrite() {
 			if c.index >= len(c.buffs) {
 				this.service.postCompleteStatus(this, c.buffs, c.transfered, nil, c.context)
 				this.w.popFront()
-			} else if ver == this.writeableVer {
-				this.writeable = false
-				this.service.poller.enableWrite(this)
 			}
 		}
 	}
