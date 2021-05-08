@@ -32,11 +32,12 @@ const (
 	EV_WRITE     = int(1 << 2)
 	EV_ERROR     = int(1 << 3)
 	MaxIovecSize = 64
+	//这两值定义为常量性能更好，原因尚不明
+	CompleteQueueSize = 65535 * 2
+	TaskQueueSize     = 65535 * 2
 )
 
 const (
-	CompleteQueueSize   = 65535
-	TaskQueueSize       = 65535
 	ConnMgrSize         = 263
 	DefaultWorkerCount  = 1
 	DefaultRecvBuffSize = 4096
