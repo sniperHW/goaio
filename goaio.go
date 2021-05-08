@@ -475,93 +475,10 @@ func (this *AIOConn) recv(context interface{}, readfull bool, buffs ...[]byte) e
 
 func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 	return this.recv(context, false, buffs...)
-	/*var deadline time.Time
-
-	if 0 != this.recvTimeout {
-		deadline = time.Now().Add(this.recvTimeout)
-	}
-
-	this.muR.Lock()
-
-	if atomic.LoadInt32(&this.closed) == 1 {
-		this.muR.Unlock()
-		return ErrConnClosed
-	}
-
-	if err := this.r.add(aioContext{
-		buffs:    buffs,
-		context:  context,
-		deadline: deadline,
-	}); nil != err {
-		this.muR.Unlock()
-		return err
-	}
-
-	if !this.connMgr.addIO(this) {
-		this.r.dropLast()
-		this.muR.Unlock()
-		return ErrServiceClosed
-	}
-
-	if !deadline.IsZero() && nil == this.rtimer {
-		this.rtimer = time.AfterFunc(this.recvTimeout, this.onReadTimeout)
-	}
-
-	if this.readable && !this.doingR {
-		this.doingR = true
-		this.muR.Unlock()
-		this.tq <- this.doRead
-	} else {
-		this.muR.Unlock()
-	}
-
-	return nil*/
 }
 
 func (this *AIOConn) RecvFull(context interface{}, buffs ...[]byte) error {
 	return this.recv(context, true, buffs...)
-	/*var deadline time.Time
-
-	if 0 != this.recvTimeout {
-		deadline = time.Now().Add(this.recvTimeout)
-	}
-
-	this.muR.Lock()
-
-	if atomic.LoadInt32(&this.closed) == 1 {
-		this.muR.Unlock()
-		return ErrConnClosed
-	}
-
-	if err := this.r.add(aioContext{
-		buffs:    buffs,
-		context:  context,
-		deadline: deadline,
-		readfull: true,
-	}); nil != err {
-		this.muR.Unlock()
-		return err
-	}
-
-	if !this.connMgr.addIO(this) {
-		this.r.dropLast()
-		this.muR.Unlock()
-		return ErrServiceClosed
-	}
-
-	if !deadline.IsZero() && nil == this.rtimer {
-		this.rtimer = time.AfterFunc(this.recvTimeout, this.onReadTimeout)
-	}
-
-	if this.readable && !this.doingR {
-		this.doingR = true
-		this.muR.Unlock()
-		this.tq <- this.doRead
-	} else {
-		this.muR.Unlock()
-	}
-
-	return nil*/
 }
 
 func (this *AIOConn) onActive(ev int) {
@@ -791,10 +708,7 @@ func (this *AIOConn) doWrite() {
 			if c.index >= len(c.buffs) {
 				this.service.postCompleteStatus(this, c.buffs, c.transfered, nil, c.context)
 				this.w.popFront()
-			} /* else if ver == this.writeableVer {
-				this.writeable = false
-				this.service.poller.enableWrite(this)
-			}*/
+			}
 		}
 	}
 
