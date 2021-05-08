@@ -28,17 +28,18 @@ var (
 )
 
 const (
-	EV_READ  = int(1 << 1)
-	EV_WRITE = int(1 << 2)
-	EV_ERROR = int(1 << 3)
+	EV_READ      = int(1 << 1)
+	EV_WRITE     = int(1 << 2)
+	EV_ERROR     = int(1 << 3)
+	MaxIovecSize = 64
 )
 
 var (
-	MaxIovecSize       = 64
-	CompleteQueueSize  = 65535
-	TaskQueueSize      = 65535
-	ConnMgrSize        = 263
-	DefaultWorkerCount = 1
+	CompleteQueueSize   = 65535
+	TaskQueueSize       = 65535
+	ConnMgrSize         = 263
+	DefaultWorkerCount  = 1
+	DefaultRecvBuffSize = 4096
 )
 
 type ShareBuffer interface {
@@ -523,7 +524,7 @@ func (this *AIOConn) doRead() {
 				userShareBuffer = true
 				cc = 1
 			} else {
-				c.buffs = append(c.buffs, make([]byte, 4096))
+				c.buffs = append(c.buffs, make([]byte, DefaultRecvBuffSize))
 			}
 		}
 
