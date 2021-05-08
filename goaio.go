@@ -118,9 +118,9 @@ type AIOConn struct {
 type AIOService struct {
 	sync.Mutex
 	completeQueue chan AIOResult
-	tq            []chan *AIOConn
+	tq            chan *AIOConn
 	poller        pollerI
-	closed        *int32
+	closed        int32
 	waitgroup     *sync.WaitGroup
 	closeOnce     sync.Once
 	connMgr       []*connMgr
@@ -704,7 +704,7 @@ func NewAIOService(worker int) *AIOService {
 		s.poller = poller
 		s.connMgr = make([]*connMgr, 251)
 		s.waitgroup = waitgroup
-		s.closed = new(int32)
+		s.tq = make(chan *AIOConn, 65535)
 		for k, _ := range s.connMgr {
 			m := &connMgr{}
 			m.head.nnext = &m.head
@@ -716,13 +716,11 @@ func NewAIOService(worker int) *AIOService {
 		}
 
 		for i := 0; i < worker; i++ {
-			tq := make(chan *AIOConn, 4096)
-			s.tq = append(s.tq, tq)
 			go func() {
 				waitgroup.Add(1)
 				defer waitgroup.Done()
 				for {
-					v, ok := <-tq
+					v, ok := <-s.tq
 					if !ok {
 						return
 					} else {
@@ -732,7 +730,7 @@ func NewAIOService(worker int) *AIOService {
 			}()
 		}
 
-		go poller.wait(s.closed)
+		go poller.wait(&s.closed)
 
 		runtime.SetFinalizer(s, func(s *AIOService) {
 			s.Close()
@@ -753,7 +751,7 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 	this.Lock()
 	defer this.Unlock()
 
-	if 1 == *this.closed {
+	if atomic.LoadInt32(&this.closed) == 1 {
 		return nil, ErrServiceClosed
 	}
 
@@ -788,7 +786,7 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 		r:         newAioContextQueue(option.RecvqueSize),
 		w:         newAioContextQueue(option.SendqueSize),
 		userData:  option.UserData,
-		tq:        this.tq[fd%len(this.tq)],
+		tq:        this.tq,
 		connMgr:   this.connMgr[fd%len(this.connMgr)],
 	}
 
@@ -823,15 +821,13 @@ func (this *AIOService) Close() {
 		runtime.SetFinalizer(this, nil)
 		this.Lock()
 		defer this.Unlock()
-		atomic.StoreInt32(this.closed, 1)
+		atomic.StoreInt32(&this.closed, 1)
 		this.poller.close()
 		for _, v := range this.connMgr {
 			v.close()
 		}
 
-		for _, v := range this.tq {
-			close(v)
-		}
+		close(this.tq)
 
 		//等待worker处理完所有的AIOConn清理
 		this.waitgroup.Wait()
