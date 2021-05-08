@@ -168,6 +168,59 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+func TestRecvFull(t *testing.T) {
+	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	ln, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	die := make(chan struct{})
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+
+			c, _ := Bind(conn, AIOConnOption{})
+
+			c.RecvFull(nil, make([]byte, 5))
+
+			for {
+				res, ok := GetCompleteStatus()
+				fmt.Println(res, ok)
+				if !ok {
+					break
+				} else if nil == res.Err {
+					assert.Equal(t, string(res.Buffs[0]), "hello")
+					res.Conn.Close(nil)
+					break
+				}
+			}
+
+			close(die)
+			return
+		}
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn.Write([]byte("he"))
+	time.Sleep(time.Second)
+	conn.Write([]byte("llo"))
+
+	<-die
+}
+
 func TestSendEmptyBuff(t *testing.T) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	if err != nil {

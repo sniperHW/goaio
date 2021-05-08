@@ -59,6 +59,7 @@ type aioContext struct {
 	index      int //buffs索引
 	offset     int //[]byte内下标
 	transfered int //已经传输的字节数
+	readfull   bool
 	context    interface{}
 	deadline   time.Time
 }
@@ -427,8 +428,52 @@ func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
 
 }
 
-func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
+func (this *AIOConn) recv(context interface{}, readfull bool, buffs ...[]byte) error {
+	var deadline time.Time
 
+	if 0 != this.recvTimeout {
+		deadline = time.Now().Add(this.recvTimeout)
+	}
+
+	this.muR.Lock()
+
+	if atomic.LoadInt32(&this.closed) == 1 {
+		this.muR.Unlock()
+		return ErrConnClosed
+	}
+
+	if err := this.r.add(aioContext{
+		buffs:    buffs,
+		context:  context,
+		deadline: deadline,
+		readfull: readfull,
+	}); nil != err {
+		this.muR.Unlock()
+		return err
+	}
+
+	if !this.connMgr.addIO(this) {
+		this.r.dropLast()
+		this.muR.Unlock()
+		return ErrServiceClosed
+	}
+
+	if !deadline.IsZero() && nil == this.rtimer {
+		this.rtimer = time.AfterFunc(this.recvTimeout, this.onReadTimeout)
+	}
+
+	if this.readable && !this.doingR {
+		this.doingR = true
+		this.muR.Unlock()
+		this.tq <- this.doRead
+	} else {
+		this.muR.Unlock()
+	}
+
+	return nil
+}
+
+func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 	var deadline time.Time
 
 	if 0 != this.recvTimeout {
@@ -470,7 +515,51 @@ func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 	}
 
 	return nil
+}
 
+func (this *AIOConn) RecvFull(context interface{}, buffs ...[]byte) error {
+	var deadline time.Time
+
+	if 0 != this.recvTimeout {
+		deadline = time.Now().Add(this.recvTimeout)
+	}
+
+	this.muR.Lock()
+
+	if atomic.LoadInt32(&this.closed) == 1 {
+		this.muR.Unlock()
+		return ErrConnClosed
+	}
+
+	if err := this.r.add(aioContext{
+		buffs:    buffs,
+		context:  context,
+		deadline: deadline,
+		readfull: true,
+	}); nil != err {
+		this.muR.Unlock()
+		return err
+	}
+
+	if !this.connMgr.addIO(this) {
+		this.r.dropLast()
+		this.muR.Unlock()
+		return ErrServiceClosed
+	}
+
+	if !deadline.IsZero() && nil == this.rtimer {
+		this.rtimer = time.AfterFunc(this.recvTimeout, this.onReadTimeout)
+	}
+
+	if this.readable && !this.doingR {
+		this.doingR = true
+		this.muR.Unlock()
+		this.tq <- this.doRead
+	} else {
+		this.muR.Unlock()
+	}
+
+	return nil
 }
 
 func (this *AIOConn) onActive(ev int) {
@@ -520,6 +609,7 @@ func (this *AIOConn) doRead() {
 		userShareBuffer := false
 		var sharebuff []byte
 		var cc int
+		var total int
 		if len(c.buffs) == 0 {
 			if nil != this.sharebuff {
 				sharebuff = this.sharebuff.Acquire()
@@ -532,7 +622,13 @@ func (this *AIOConn) doRead() {
 		}
 
 		if !userShareBuffer {
-			cc, _ = this.r.packIovec(&this.recv_iovec)
+			cc, total = this.r.packIovec(&this.recv_iovec)
+			if 0 == total {
+				c := this.r.front()
+				this.service.postCompleteStatus(this, c.buffs, c.transfered, ErrEmptyBuff, c.context)
+				this.r.popFront()
+				continue
+			}
 		}
 
 		var (
@@ -581,9 +677,33 @@ func (this *AIOConn) doRead() {
 				c.buffs = append(c.buffs, sharebuff)
 			}
 
-			this.service.postCompleteStatus(this, c.buffs, size, nil, c.context)
-			this.r.popFront()
+			if !userShareBuffer && c.readfull {
 
+				remain := size
+				for remain > 0 {
+					s := len(c.buffs[c.index][c.offset:])
+					if remain >= s {
+						remain -= s
+						c.transfered += s
+						c.index++
+						c.offset = 0
+					} else {
+						c.offset += remain
+						c.transfered += remain
+						remain = 0
+					}
+				}
+
+				if c.index >= len(c.buffs) {
+					this.service.postCompleteStatus(this, c.buffs, c.transfered, nil, c.context)
+					this.r.popFront()
+				}
+
+			} else {
+
+				this.service.postCompleteStatus(this, c.buffs, size, nil, c.context)
+				this.r.popFront()
+			}
 		}
 	}
 
