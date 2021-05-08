@@ -2,7 +2,6 @@ package goaio
 
 import (
 	"errors"
-	//"fmt"
 	"io"
 	"net"
 	"runtime"
@@ -34,7 +33,12 @@ const (
 	EV_ERROR = int(1 << 3)
 )
 
-const MaxIovecSize = 64
+const (
+	MaxIovecSize      = 64
+	CompleteQueueSize = 65535
+	TaskQueueSize     = 65535
+	ConnMgrSize       = 263
+)
 
 var (
 	DefaultWorkerCount = 1
@@ -106,7 +110,6 @@ type AIOConn struct {
 	closed        int32
 	pollerVersion int32
 	closeOnce     sync.Once
-	taskCount     int32
 	sendTimeout   time.Duration
 	recvTimeout   time.Duration
 	reason        error
@@ -241,7 +244,6 @@ func (this *AIOConn) Close(reason error) {
 
 		if !this.doingR {
 			this.doingR = true
-			atomic.AddInt32(&this.taskCount, 1)
 			this.tq <- this.doRead
 		}
 		this.muR.Unlock()
@@ -254,10 +256,14 @@ func (this *AIOConn) Close(reason error) {
 
 		if !this.doingW {
 			this.doingW = true
-			atomic.AddInt32(&this.taskCount, 1)
 			this.tq <- this.doWrite
 		}
 		this.muW.Unlock()
+
+		this.service.unwatch(this)
+
+		this.rawconn.Close()
+
 	})
 }
 
@@ -411,7 +417,6 @@ func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
 
 		if this.writeable && !this.doingW {
 			this.doingW = true
-			atomic.AddInt32(&this.taskCount, 1)
 			this.muW.Unlock()
 			this.tq <- this.doWrite
 		} else {
@@ -457,7 +462,6 @@ func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 
 		if this.readable && !this.doingR {
 			this.doingR = true
-			atomic.AddInt32(&this.taskCount, 1)
 			this.muR.Unlock()
 			this.tq <- this.doRead
 		} else {
@@ -470,13 +474,16 @@ func (this *AIOConn) Recv(context interface{}, buffs ...[]byte) error {
 
 func (this *AIOConn) onActive(ev int) {
 
+	if atomic.LoadInt32(&this.closed) == 1 {
+		return
+	}
+
 	if ev&EV_READ != 0 || ev&EV_ERROR != 0 {
 		this.muR.Lock()
 		this.readable = true
 		this.readableVer++
 		if !this.r.empty() && !this.doingR {
 			this.doingR = true
-			atomic.AddInt32(&this.taskCount, 1)
 			this.muR.Unlock()
 			this.tq <- this.doRead
 		} else {
@@ -490,7 +497,6 @@ func (this *AIOConn) onActive(ev int) {
 		this.writeableVer++
 		if !this.w.empty() && !this.doingW {
 			this.doingW = true
-			atomic.AddInt32(&this.taskCount, 1)
 			this.muW.Unlock()
 			this.tq <- this.doWrite
 		} else {
@@ -591,22 +597,12 @@ func (this *AIOConn) doRead() {
 			this.service.postCompleteStatus(this, c.buffs, 0, this.reason, c.context)
 			this.r.popFront()
 		}
-
-		if 0 == atomic.AddInt32(&this.taskCount, -1) {
-			this.service.unwatch(this)
-			this.rawconn.Close()
-			this.muR.Unlock()
-		}
-
-		return
-
 	} else if nil != this.dorTimer && this.rtimer == this.dorTimer {
 		this.dorTimer = nil
 		this.processReadTimeout()
 	}
 
 	this.doingR = false
-	atomic.AddInt32(&this.taskCount, -1)
 	this.muR.Unlock()
 }
 
@@ -691,22 +687,12 @@ func (this *AIOConn) doWrite() {
 			this.service.postCompleteStatus(this, c.buffs, c.transfered, this.reason, c.context)
 			this.w.popFront()
 		}
-
-		if 0 == atomic.AddInt32(&this.taskCount, -1) {
-			this.service.unwatch(this)
-			this.rawconn.Close()
-			this.muW.Unlock()
-		}
-
-		return
-
 	} else if nil != this.dowTimer && this.wtimer == this.dowTimer {
 		this.dowTimer = nil
 		this.processWriteTimeout()
 	}
 
 	this.doingW = false
-	atomic.AddInt32(&this.taskCount, -1)
 	this.muW.Unlock()
 }
 
@@ -777,11 +763,11 @@ func NewAIOService(worker int) *AIOService {
 	if poller, err := openPoller(); nil == err {
 		waitgroup := &sync.WaitGroup{}
 		s := &AIOService{}
-		s.completeQueue = make(chan AIOResult, 65535)
+		s.completeQueue = make(chan AIOResult, CompleteQueueSize)
 		s.poller = poller
-		s.connMgr = make([]*connMgr, 251)
+		s.connMgr = make([]*connMgr, ConnMgrSize)
 		s.waitgroup = waitgroup
-		s.tq = make(chan func(), 65535)
+		s.tq = make(chan func(), TaskQueueSize)
 		for k, _ := range s.connMgr {
 			m := &connMgr{}
 			m.head.nnext = &m.head
@@ -899,16 +885,15 @@ func (this *AIOService) Close() {
 		this.Lock()
 		defer this.Unlock()
 		atomic.StoreInt32(&this.closed, 1)
+
 		this.poller.close()
 		for _, v := range this.connMgr {
 			v.close()
 		}
 
 		close(this.tq)
-
 		//等待worker处理完所有的AIOConn清理
 		this.waitgroup.Wait()
-
 		//所有的待处理的AIO在此时已经被投递到completeQueue，可以关闭completeQueue。
 		close(this.completeQueue)
 	})

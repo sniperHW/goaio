@@ -92,7 +92,6 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 				break
 			}
 		}
-
 		w.Close()
 		close(die)
 	}()
@@ -1477,7 +1476,9 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 
 	w := NewAIOService(1)
 
-	defer w.Close()
+	defer func() {
+		w.Close()
+	}()
 
 	addr, _ := net.ResolveTCPAddr("tcp", ln.Addr().String())
 	for i := 0; i < numconn; i++ {
