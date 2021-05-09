@@ -4,9 +4,16 @@ package goaio
 
 import (
 	"container/list"
-	"sync"
+	//"sync"
 	"sync/atomic"
 	"syscall"
+)
+
+const (
+	readEvents         = int(syscall.EPOLLIN)
+	writeEvents        = int(syscall.EPOLLOUT)
+	errorEvents        = int(syscall.EPOLLERR | syscall.EPOLLHUP | syscall.EPOLLRDHUP)
+	EPOLLET     uint32 = 0x80000000
 )
 
 type epoll struct {
@@ -21,7 +28,7 @@ func openPoller() (*epoll, error) {
 	}
 	poller := new(epoll)
 	poller.fd = epollFD
-	poller.fd2Conn = fd2Conn(make([]sync.Map, hashSize))
+	poller.fd2Conn = newFd2Conn() //fd2Conn(make([]sync.Map, hashSize))
 	poller.die = make(chan struct{})
 	poller.pending = list.New()
 
@@ -60,18 +67,6 @@ func (p *epoll) close() {
 func (p *epoll) trigger() error {
 	_, err := syscall.Write(p.wfd, []byte{0, 0, 0, 0, 0, 0, 0, 1})
 	return err
-}
-
-const EPOLLET uint32 = 0x80000000
-
-func (p *epoll) enableWrite(c *AIOConn) bool {
-	err := syscall.EpollCtl(p.fd, syscall.EPOLL_CTL_MOD, c.fd, &syscall.EpollEvent{Fd: int32(c.fd), Events: syscall.EPOLLRDHUP | syscall.EPOLLIN | syscall.EPOLLOUT | EPOLLET})
-	return nil == err
-}
-
-func (p *epoll) disableWrite(c *AIOConn) bool {
-	err := syscall.EpollCtl(p.fd, syscall.EPOLL_CTL_MOD, c.fd, &syscall.EpollEvent{Fd: int32(c.fd), Events: syscall.EPOLLRDHUP | syscall.EPOLLIN | EPOLLET})
-	return nil == err
 }
 
 func (p *epoll) _watch(conn *AIOConn) bool {
@@ -117,12 +112,6 @@ func (p *epoll) unwatch(conn *AIOConn) bool {
 		return false
 	}
 }
-
-const (
-	readEvents  = int(syscall.EPOLLIN)
-	writeEvents = int(syscall.EPOLLOUT)
-	errorEvents = int(syscall.EPOLLERR | syscall.EPOLLHUP | syscall.EPOLLRDHUP)
-)
 
 func (p *epoll) wait(stoped *int32) {
 

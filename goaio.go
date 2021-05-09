@@ -501,9 +501,6 @@ func (this *AIOConn) onActive(ev int) {
 	}
 
 	if ev&EV_WRITE != 0 || ev&EV_ERROR != 0 {
-		if ev&EV_WRITE != 0 {
-			this.service.poller.disableWrite(this)
-		}
 		this.muW.Lock()
 		this.writeable = true
 		this.writeableVer++
@@ -689,7 +686,6 @@ func (this *AIOConn) doWrite() {
 		} else if e == syscall.EAGAIN {
 			if ver == this.writeableVer {
 				this.writeable = false
-				this.service.poller.enableWrite(this)
 			}
 		} else {
 			remain := size

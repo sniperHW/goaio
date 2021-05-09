@@ -4,7 +4,7 @@ package goaio
 
 import (
 	"container/list"
-	"sync"
+	//"sync"
 	"sync/atomic"
 	"syscall"
 )
@@ -20,7 +20,7 @@ func openPoller() (*kqueue, error) {
 	}
 	poller := new(kqueue)
 	poller.fd = kfd
-	poller.fd2Conn = fd2Conn(make([]sync.Map, hashSize))
+	poller.fd2Conn = newFd2Conn() //fd2Conn(make([]sync.Map, hashSize))
 	poller.die = make(chan struct{})
 	poller.pending = list.New()
 
@@ -50,16 +50,6 @@ func (p *kqueue) trigger() error {
 		Fflags: syscall.NOTE_TRIGGER,
 	}}, nil, nil)
 	return err
-}
-
-func (p *kqueue) enableWrite(c *AIOConn) bool {
-	_, err := syscall.Kevent(p.fd, []syscall.Kevent_t{{Ident: uint64(c.fd), Flags: syscall.EV_ENABLE, Filter: syscall.EVFILT_WRITE}}, nil, nil)
-	return nil == err
-}
-
-func (p *kqueue) disableWrite(c *AIOConn) bool {
-	_, err := syscall.Kevent(p.fd, []syscall.Kevent_t{{Ident: uint64(c.fd), Flags: syscall.EV_DISABLE, Filter: syscall.EVFILT_WRITE}}, nil, nil)
-	return nil == err
 }
 
 func (p *kqueue) _watch(conn *AIOConn) bool {
