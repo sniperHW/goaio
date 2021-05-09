@@ -90,38 +90,37 @@ type completetionQueue struct {
 }
 
 type AIOConn struct {
-	fd            int
-	rawconn       net.Conn
-	muR           sync.Mutex
-	muW           sync.Mutex
-	readable      bool
-	readableVer   int
-	writeable     bool
-	writeableVer  int
-	w             *aioContextQueue
-	r             *aioContextQueue
-	doingW        bool
-	doingR        bool
-	rtimer        *time.Timer
-	dorTimer      *time.Timer
-	wtimer        *time.Timer
-	dowTimer      *time.Timer
-	service       *AIOService
-	closed        int32
-	pollerVersion int32
-	closeOnce     sync.Once
-	sendTimeout   time.Duration
-	recvTimeout   time.Duration
-	reason        error
-	sharebuff     ShareBuffer
-	userData      interface{}
-	pprev         *AIOConn
-	nnext         *AIOConn
-	ioCount       int
-	send_iovec    [MaxIovecSize]syscall.Iovec
-	recv_iovec    [MaxIovecSize]syscall.Iovec
-	connMgr       *connMgr
-	tq            chan func()
+	fd           int
+	rawconn      net.Conn
+	muR          sync.Mutex
+	muW          sync.Mutex
+	readable     bool
+	readableVer  int
+	writeable    bool
+	writeableVer int
+	w            *aioContextQueue
+	r            *aioContextQueue
+	doingW       bool
+	doingR       bool
+	rtimer       *time.Timer
+	dorTimer     *time.Timer
+	wtimer       *time.Timer
+	dowTimer     *time.Timer
+	service      *AIOService
+	closed       int32
+	closeOnce    sync.Once
+	sendTimeout  time.Duration
+	recvTimeout  time.Duration
+	reason       error
+	sharebuff    ShareBuffer
+	userData     interface{}
+	pprev        *AIOConn
+	nnext        *AIOConn
+	ioCount      int
+	send_iovec   [MaxIovecSize]syscall.Iovec
+	recv_iovec   [MaxIovecSize]syscall.Iovec
+	connMgr      *connMgr
+	tq           chan func()
 }
 
 type AIOService struct {
@@ -502,6 +501,9 @@ func (this *AIOConn) onActive(ev int) {
 	}
 
 	if ev&EV_WRITE != 0 || ev&EV_ERROR != 0 {
+		if ev&EV_WRITE != 0 {
+			this.service.poller.disableWrite(this)
+		}
 		this.muW.Lock()
 		this.writeable = true
 		this.writeableVer++
@@ -885,7 +887,8 @@ func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, err
 		connMgr:   this.connMgr[fd%len(this.connMgr)],
 	}
 
-	if this.poller.watch(cc) {
+	ok = <-this.poller.watch(cc)
+	if ok {
 		runtime.SetFinalizer(cc, func(cc *AIOConn) {
 			cc.Close(ErrCloseGC)
 		})

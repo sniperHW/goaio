@@ -3,6 +3,7 @@
 package goaio
 
 import (
+	"container/list"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -22,6 +23,7 @@ func openPoller() (*epoll, error) {
 	poller.fd = epollFD
 	poller.fd2Conn = fd2Conn(make([]sync.Map, hashSize))
 	poller.die = make(chan struct{})
+	poller.pending = list.New()
 
 	r0, _, e0 := syscall.Syscall(syscall.SYS_EVENTFD2, 0, 0, 0)
 	if e0 != 0 {
@@ -72,13 +74,11 @@ func (p *epoll) disableWrite(c *AIOConn) bool {
 	return nil == err
 }
 
-func (p *epoll) watch(conn *AIOConn) bool {
+func (p *epoll) _watch(conn *AIOConn) bool {
 
 	if _, ok := p.fd2Conn.get(conn.fd); ok {
 		return false
 	}
-
-	conn.pollerVersion = p.updatePollerVersionOnWatch()
 
 	p.fd2Conn.add(conn)
 
@@ -89,7 +89,18 @@ func (p *epoll) watch(conn *AIOConn) bool {
 	} else {
 		return true
 	}
+}
 
+func (p *epoll) watch(conn *AIOConn) <-chan bool {
+	p.muPending.Lock()
+	ch := make(chan bool)
+	p.pending.PushBack(pendingWatch{
+		conn: conn,
+		resp: ch,
+	})
+	p.muPending.Unlock()
+	p.trigger()
+	return ch
 }
 
 func (p *epoll) unwatch(conn *AIOConn) bool {
@@ -124,6 +135,14 @@ func (p *epoll) wait(stoped *int32) {
 	eventlist := make([]syscall.EpollEvent, 64)
 
 	for atomic.LoadInt32(stoped) == 0 {
+
+		p.muPending.Lock()
+		for e := p.pending.Front(); nil != e; e = p.pending.Front() {
+			v := p.pending.Remove(e).(pendingWatch)
+			v.resp <- p._watch(v.conn)
+		}
+		p.muPending.Unlock()
+
 		n, err0 := syscall.EpollWait(p.fd, eventlist, -1)
 
 		if err0 == syscall.EINTR {
@@ -135,8 +154,6 @@ func (p *epoll) wait(stoped *int32) {
 			return
 		}
 
-		pollerVersion := p.updatePollerVersionOnWait()
-
 		for i := 0; i < n; i++ {
 
 			e := &eventlist[i]
@@ -145,7 +162,7 @@ func (p *epoll) wait(stoped *int32) {
 
 			if fd != p.wfd {
 
-				if conn, ok := p.fd2Conn.get(fd); ok && conn.pollerVersion != pollerVersion {
+				if conn, ok := p.fd2Conn.get(fd); ok {
 
 					event := int(0)
 
