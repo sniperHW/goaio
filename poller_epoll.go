@@ -4,7 +4,7 @@ package goaio
 
 import (
 	"container/list"
-	//"sync"
+	"sync"
 	"sync/atomic"
 	"syscall"
 )
@@ -28,7 +28,7 @@ func openPoller() (*epoll, error) {
 	}
 	poller := new(epoll)
 	poller.fd = epollFD
-	poller.fd2Conn = newFd2Conn() //fd2Conn(make([]sync.Map, hashSize))
+	poller.fd2Conn = fd2Conn(make([]sync.Map, hashSize))
 	poller.die = make(chan struct{})
 	poller.pending = list.New()
 
