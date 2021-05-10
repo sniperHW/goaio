@@ -100,8 +100,7 @@ type AIOService struct {
 	completeQueue chan AIOResult
 	tq            chan task
 	poller        pollerI
-	closed        int32
-	waitgroup     *sync.WaitGroup
+	die           chan struct{}
 	closeOnce     sync.Once
 	connMgr       []*connMgr
 }
@@ -136,17 +135,6 @@ func (this *aioContextQueue) add(c aioContext) error {
 		this.queue[this.tail] = c
 		this.tail = next
 		return nil
-	}
-}
-
-func (this *aioContextQueue) dropLast() {
-	if this.head != this.tail {
-		this.queue[this.tail] = aioContext{}
-		if this.tail == 0 {
-			this.tail = len(this.queue) - 1
-		} else {
-			this.tail--
-		}
 	}
 }
 
@@ -197,7 +185,7 @@ func (this *AIOConn) Close(reason error) {
 
 		if !this.doingR {
 			this.doingR = true
-			this.tq <- task{conn: this, tt: int64(EV_READ)}
+			this.service.deliverTask(&task{conn: this, tt: int64(EV_READ)})
 		}
 		this.muR.Unlock()
 
@@ -209,7 +197,7 @@ func (this *AIOConn) Close(reason error) {
 
 		if !this.doingW {
 			this.doingW = true
-			this.tq <- task{conn: this, tt: int64(EV_WRITE)}
+			this.service.deliverTask(&task{conn: this, tt: int64(EV_WRITE)})
 		}
 		this.muW.Unlock()
 
@@ -282,7 +270,7 @@ func (this *AIOConn) onReadTimeout() {
 	this.dorTimer = this.rtimer
 	if nil != this.dorTimer && !this.doingR {
 		this.doingR = true
-		this.tq <- task{conn: this, tt: int64(EV_READ)}
+		this.service.deliverTask(&task{conn: this, tt: int64(EV_READ)})
 	}
 }
 
@@ -292,7 +280,7 @@ func (this *AIOConn) onWriteTimeout() {
 	this.dowTimer = this.wtimer
 	if nil != this.dowTimer && !this.doingW {
 		this.doingW = true
-		this.tq <- task{conn: this, tt: int64(EV_WRITE)}
+		this.service.deliverTask(&task{conn: this, tt: int64(EV_WRITE)})
 	}
 }
 
@@ -349,7 +337,7 @@ func (this *AIOConn) onActive(ev int) {
 		if !this.r.empty() && !this.doingR {
 			this.doingR = true
 			this.muR.Unlock()
-			this.tq <- task{conn: this, tt: int64(EV_READ)}
+			this.service.deliverTask(&task{conn: this, tt: int64(EV_READ)})
 		} else {
 			this.muR.Unlock()
 		}
@@ -362,7 +350,7 @@ func (this *AIOConn) onActive(ev int) {
 		if !this.w.empty() && !this.doingW {
 			this.doingW = true
 			this.muW.Unlock()
-			this.tq <- task{conn: this, tt: int64(EV_WRITE)}
+			this.service.deliverTask(&task{conn: this, tt: int64(EV_WRITE)})
 		} else {
 			this.muW.Unlock()
 		}
@@ -392,55 +380,34 @@ func (this *connMgr) addIO(c *AIOConn) bool {
 func (this *connMgr) subIO(c *AIOConn) {
 	this.Lock()
 	defer this.Unlock()
-	c.ioCount--
-	if 0 == c.ioCount {
-		prev := c.pprev
-		next := c.nnext
-		prev.nnext = next
-		next.pprev = prev
-		c.pprev = nil
-		c.nnext = nil
+	if !this.closed {
+		c.ioCount--
+		if 0 == c.ioCount {
+			prev := c.pprev
+			next := c.nnext
+			prev.nnext = next
+			next.pprev = prev
+			c.pprev = nil
+			c.nnext = nil
+		}
 	}
 }
 
 func (this *connMgr) close() {
 	this.Lock()
+	defer this.Unlock()
 	this.closed = true
-	conns := []*AIOConn{}
-	n := this.head.nnext
-	for ; n != &this.head; n = n.nnext {
-		conns = append(conns, n)
-	}
-	this.Unlock()
-
-	for _, v := range conns {
-		v.Close(ErrCloseServiceClosed)
-	}
-
-	for !func() bool {
-		this.Lock()
-		defer this.Unlock()
-		if this.head.nnext == &this.head {
-			return true
-		} else {
-			return false
-		}
-
-	}() {
-		runtime.Gosched()
-	}
-
+	this.head.nnext = nil
 }
 
 func NewAIOService(worker int) *AIOService {
 	if poller, err := openPoller(); nil == err {
-		waitgroup := &sync.WaitGroup{}
 		s := &AIOService{}
 		s.completeQueue = make(chan AIOResult, CompleteQueueSize)
 		s.poller = poller
 		s.connMgr = make([]*connMgr, ConnMgrSize)
-		s.waitgroup = waitgroup
 		s.tq = make(chan task, TaskQueueSize)
+		s.die = make(chan struct{})
 		for k, _ := range s.connMgr {
 			m := &connMgr{}
 			m.head.nnext = &m.head
@@ -453,13 +420,11 @@ func NewAIOService(worker int) *AIOService {
 
 		for i := 0; i < worker; i++ {
 			go func() {
-				waitgroup.Add(1)
-				defer waitgroup.Done()
 				for {
-					v, ok := <-s.tq
-					if !ok {
+					select {
+					case <-s.die:
 						return
-					} else {
+					case v := <-s.tq:
 						if int(v.tt) == EV_READ {
 							v.conn.doRead()
 						} else {
@@ -470,7 +435,7 @@ func NewAIOService(worker int) *AIOService {
 			}()
 		}
 
-		go poller.wait(&s.closed)
+		go poller.wait(s.die)
 
 		runtime.SetFinalizer(s, func(s *AIOService) {
 			s.Close()
@@ -486,65 +451,82 @@ func (this *AIOService) unwatch(c *AIOConn) {
 	this.poller.unwatch(c)
 }
 
-func (this *AIOService) Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
+func (this *AIOService) CreateAIOConn(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
 
 	this.Lock()
 	defer this.Unlock()
 
-	if atomic.LoadInt32(&this.closed) == 1 {
+	select {
+	case <-this.die:
 		return nil, ErrServiceClosed
-	}
+	default:
 
-	c, ok := conn.(interface {
-		SyscallConn() (syscall.RawConn, error)
-	})
-
-	if !ok {
-		return nil, ErrUnsupportConn
-	}
-
-	rawconn, err := c.SyscallConn()
-	if err != nil {
-		return nil, err
-	}
-
-	var fd int
-
-	if err := rawconn.Control(func(s uintptr) {
-		fd = int(s)
-	}); err != nil {
-		return nil, err
-	}
-
-	syscall.SetNonblock(fd, true)
-
-	cc := &AIOConn{
-		aioConnBase: aioConnBase{
-			fd:        fd,
-			rawconn:   conn,
-			service:   this,
-			sharebuff: option.ShareBuff,
-			r:         newAioContextQueue(option.RecvqueSize),
-			w:         newAioContextQueue(option.SendqueSize),
-			userData:  option.UserData,
-			tq:        this.tq,
-			connMgr:   this.connMgr[fd%len(this.connMgr)],
-		},
-	}
-
-	ok = <-this.poller.watch(cc)
-	if ok {
-		runtime.SetFinalizer(cc, func(cc *AIOConn) {
-			cc.Close(ErrCloseGC)
+		c, ok := conn.(interface {
+			SyscallConn() (syscall.RawConn, error)
 		})
-		return cc, nil
-	} else {
-		return nil, ErrWatchFailed
+
+		if !ok {
+			return nil, ErrUnsupportConn
+		}
+
+		rawconn, err := c.SyscallConn()
+		if err != nil {
+			return nil, err
+		}
+
+		var fd int
+
+		if err := rawconn.Control(func(s uintptr) {
+			fd = int(s)
+		}); err != nil {
+			return nil, err
+		}
+
+		syscall.SetNonblock(fd, true)
+
+		cc := &AIOConn{
+			aioConnBase: aioConnBase{
+				fd:        fd,
+				rawconn:   conn,
+				service:   this,
+				sharebuff: option.ShareBuff,
+				r:         newAioContextQueue(option.RecvqueSize),
+				w:         newAioContextQueue(option.SendqueSize),
+				userData:  option.UserData,
+				tq:        this.tq,
+				connMgr:   this.connMgr[fd%len(this.connMgr)],
+			},
+		}
+
+		ok = <-this.poller.watch(cc)
+		if ok {
+			runtime.SetFinalizer(cc, func(cc *AIOConn) {
+				cc.Close(ErrCloseGC)
+			})
+			return cc, nil
+		} else {
+			return nil, ErrWatchFailed
+		}
+	}
+}
+
+func (this *AIOService) deliverTask(t *task) bool {
+	select {
+	case <-this.die:
+		return false
+	case this.tq <- *t:
+		return true
 	}
 }
 
 func (this *AIOService) GetCompleteStatus() (r AIOResult, ok bool) {
-	r, ok = <-this.completeQueue
+	select {
+	case <-this.die:
+		r = AIOResult{}
+		ok = false
+	default:
+		r, ok = <-this.completeQueue
+	}
 	return
 }
 
@@ -553,26 +535,22 @@ func (this *AIOService) Close() {
 		runtime.SetFinalizer(this, nil)
 		this.Lock()
 		defer this.Unlock()
-		atomic.StoreInt32(&this.closed, 1)
+
+		close(this.die)
 
 		this.poller.close()
+
 		for _, v := range this.connMgr {
 			v.close()
 		}
-
-		close(this.tq)
-		//等待worker处理完所有的AIOConn清理
-		this.waitgroup.Wait()
-		//所有的待处理的AIO在此时已经被投递到completeQueue，可以关闭completeQueue。
-		close(this.completeQueue)
 	})
 }
 
-func Bind(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
+func CreateAIOConn(conn net.Conn, option AIOConnOption) (*AIOConn, error) {
 	createOnce.Do(func() {
 		defalutService = NewAIOService(DefaultWorkerCount)
 	})
-	return defalutService.Bind(conn, option)
+	return defalutService.CreateAIOConn(conn, option)
 }
 
 func GetCompleteStatus() (AIOResult, bool) {

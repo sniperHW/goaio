@@ -52,7 +52,7 @@ func main() {
 
 		fmt.Println("new client")
 
-		c, _ := goaio.Bind(conn, goaio.AIOConnOption{})
+		c, _ := goaio.CreateAIOConn(conn, goaio.AIOConnOption{})
 
 		c.SetRecvTimeout(time.Second * 5)
 

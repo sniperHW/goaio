@@ -5,7 +5,6 @@ package goaio
 import (
 	"container/list"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
@@ -30,7 +29,6 @@ func openPoller() (*epoll, error) {
 	poller := new(epoll)
 	poller.fd = epollFD
 	poller.fd2Conn = fd2Conn(make([]sync.Map, hashSize))
-	poller.die = make(chan struct{})
 	poller.pending = list.New()
 
 	r0, _, e0 := syscall.Syscall(syscall.SYS_EVENTFD2, 0, 0, 0)
@@ -62,7 +60,6 @@ func openPoller() (*epoll, error) {
 
 func (p *epoll) close() {
 	p.trigger()
-	<-p.die
 }
 
 func (p *epoll) trigger() error {
@@ -114,75 +111,79 @@ func (p *epoll) unwatch(conn *AIOConn) bool {
 	}
 }
 
-func (p *epoll) wait(stoped *int32) {
+func (p *epoll) wait(die <-chan struct{}) {
 
 	defer func() {
 		syscall.Close(p.fd)
 		syscall.Close(p.wfd)
-		close(p.die)
 	}()
 
 	eventlist := make([]syscall.EpollEvent, 64)
 
-	for atomic.LoadInt32(stoped) == 0 {
-
-		p.muPending.Lock()
-		for e := p.pending.Front(); nil != e; e = p.pending.Front() {
-			v := p.pending.Remove(e).(pendingWatch)
-			v.resp <- p._watch(v.conn)
-		}
-		p.muPending.Unlock()
-
-		n, err0 := syscall.EpollWait(p.fd, eventlist, -1)
-
-		if err0 == syscall.EINTR {
-			continue
-		}
-
-		if err0 != nil && err0 != syscall.EINTR {
-			panic(err0)
+	for {
+		select {
+		case <-die:
 			return
-		}
+		default:
 
-		for i := 0; i < n; i++ {
+			p.muPending.Lock()
+			for e := p.pending.Front(); nil != e; e = p.pending.Front() {
+				v := p.pending.Remove(e).(pendingWatch)
+				v.resp <- p._watch(v.conn)
+			}
+			p.muPending.Unlock()
 
-			e := &eventlist[i]
+			n, err0 := syscall.EpollWait(p.fd, eventlist, -1)
 
-			fd := int(e.Fd)
+			if err0 == syscall.EINTR {
+				continue
+			}
 
-			if fd != p.wfd {
+			if err0 != nil && err0 != syscall.EINTR {
+				panic(err0)
+				return
+			}
 
-				if conn, ok := p.fd2Conn.get(fd); ok {
+			for i := 0; i < n; i++ {
 
-					event := int(0)
+				e := &eventlist[i]
 
-					if e.Events&uint32(errorEvents) != 0 {
-						event |= EV_ERROR
+				fd := int(e.Fd)
+
+				if fd != p.wfd {
+
+					if conn, ok := p.fd2Conn.get(fd); ok {
+
+						event := int(0)
+
+						if e.Events&uint32(errorEvents) != 0 {
+							event |= EV_ERROR
+						}
+
+						if e.Events&uint32(readEvents) != 0 {
+							event |= EV_READ
+						}
+
+						if e.Events&uint32(writeEvents) != 0 {
+							event |= EV_WRITE
+						}
+
+						conn.onActive(event)
 					}
 
-					if e.Events&uint32(readEvents) != 0 {
-						event |= EV_READ
-					}
-
-					if e.Events&uint32(writeEvents) != 0 {
-						event |= EV_WRITE
-					}
-
-					conn.onActive(event)
-				}
-
-			} else {
-				buff := make([]byte, 8)
-				for {
-					if _, err := syscall.Read(p.wfd, buff); err == syscall.EAGAIN {
-						break
+				} else {
+					buff := make([]byte, 8)
+					for {
+						if _, err := syscall.Read(p.wfd, buff); err == syscall.EAGAIN {
+							break
+						}
 					}
 				}
 			}
-		}
 
-		if n == len(eventlist) {
-			eventlist = make([]syscall.EpollEvent, n<<1)
+			if n == len(eventlist) {
+				eventlist = make([]syscall.EpollEvent, n<<1)
+			}
 		}
 	}
 }

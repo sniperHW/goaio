@@ -55,7 +55,6 @@ func (this *AIOConn) Send(context interface{}, buff []byte) error {
 	}
 
 	if !this.connMgr.addIO(this) {
-		this.w.dropLast()
 		this.muW.Unlock()
 		return ErrServiceClosed
 	}
@@ -67,7 +66,9 @@ func (this *AIOConn) Send(context interface{}, buff []byte) error {
 	if this.writeable && !this.doingW {
 		this.doingW = true
 		this.muW.Unlock()
-		this.tq <- task{conn: this, tt: int64(EV_WRITE)}
+		if !this.service.deliverTask(&task{conn: this, tt: int64(EV_WRITE)}) {
+			return ErrServiceClosed
+		}
 	} else {
 		this.muW.Unlock()
 	}
@@ -101,7 +102,6 @@ func (this *AIOConn) recv(context interface{}, readfull bool, buff []byte) error
 	}
 
 	if !this.connMgr.addIO(this) {
-		this.r.dropLast()
 		this.muR.Unlock()
 		return ErrServiceClosed
 	}
@@ -113,7 +113,9 @@ func (this *AIOConn) recv(context interface{}, readfull bool, buff []byte) error
 	if this.readable && !this.doingR {
 		this.doingR = true
 		this.muR.Unlock()
-		this.tq <- task{conn: this, tt: int64(EV_READ)}
+		if !this.service.deliverTask(&task{conn: this, tt: int64(EV_READ)}) {
+			return ErrServiceClosed
+		}
 	} else {
 		this.muR.Unlock()
 	}
@@ -272,12 +274,16 @@ func (this *AIOConn) doWrite() {
 }
 
 func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfer int, err error, context interface{}) {
-	this.completeQueue <- AIOResult{
-		Conn:          c,
-		Context:       context,
-		Err:           err,
-		Buff:          buff,
-		Bytestransfer: bytestransfer,
+	select {
+	case <-this.die:
+		return
+	default:
+		this.completeQueue <- AIOResult{
+			Conn:          c,
+			Context:       context,
+			Err:           err,
+			Buff:          buff,
+			Bytestransfer: bytestransfer,
+		}
 	}
-	c.connMgr.subIO(c)
 }

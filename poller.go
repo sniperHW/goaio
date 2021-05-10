@@ -38,7 +38,6 @@ type poller_base struct {
 	fd        int
 	fd2Conn   fd2Conn
 	ver       int64
-	die       chan struct{}
 	muPending sync.Mutex
 	pending   *list.List
 }
@@ -48,5 +47,5 @@ type pollerI interface {
 	trigger() error
 	watch(*AIOConn) <-chan bool
 	unwatch(*AIOConn) bool
-	wait(*int32)
+	wait(<-chan struct{})
 }

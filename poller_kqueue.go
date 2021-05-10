@@ -5,7 +5,7 @@ package goaio
 import (
 	"container/list"
 	"sync"
-	"sync/atomic"
+	//"sync/atomic"
 	"syscall"
 )
 
@@ -21,7 +21,7 @@ func openPoller() (*kqueue, error) {
 	poller := new(kqueue)
 	poller.fd = kfd
 	poller.fd2Conn = fd2Conn(make([]sync.Map, hashSize))
-	poller.die = make(chan struct{})
+	//poller.die = make(chan struct{})
 	poller.pending = list.New()
 
 	_, err = syscall.Kevent(poller.fd, []syscall.Kevent_t{{
@@ -40,7 +40,6 @@ func openPoller() (*kqueue, error) {
 
 func (p *kqueue) close() {
 	p.trigger()
-	<-p.die
 }
 
 func (p *kqueue) trigger() error {
@@ -104,61 +103,65 @@ func (p *kqueue) unwatch(conn *AIOConn) bool {
 	}
 }
 
-func (p *kqueue) wait(stoped *int32) {
+func (p *kqueue) wait(die <-chan struct{}) {
 
 	defer func() {
 		syscall.Close(p.fd)
-		close(p.die)
 	}()
 
 	eventlist := make([]syscall.Kevent_t, 64)
 
-	for atomic.LoadInt32(stoped) == 0 {
-
-		p.muPending.Lock()
-		for e := p.pending.Front(); nil != e; e = p.pending.Front() {
-			v := p.pending.Remove(e).(pendingWatch)
-			v.resp <- p._watch(v.conn)
-		}
-		p.muPending.Unlock()
-
-		n, err0 := syscall.Kevent(p.fd, nil, eventlist, nil)
-
-		if err0 == syscall.EINTR {
-			continue
-		}
-
-		if err0 != nil && err0 != syscall.EINTR {
-			panic(err0)
+	for {
+		select {
+		case <-die:
 			return
-		}
+		default:
 
-		if n > 0 {
-			for i := 0; i < n; i++ {
-				e := &eventlist[i]
-				fd := int(e.Ident)
-				if fd != 0 {
-					if conn, ok := p.fd2Conn.get(fd); ok {
-						event := int(0)
-						if (e.Flags&syscall.EV_EOF != 0) || (e.Flags&syscall.EV_ERROR != 0) {
-							event |= EV_ERROR
-						}
+			p.muPending.Lock()
+			for e := p.pending.Front(); nil != e; e = p.pending.Front() {
+				v := p.pending.Remove(e).(pendingWatch)
+				v.resp <- p._watch(v.conn)
+			}
+			p.muPending.Unlock()
 
-						if e.Filter == syscall.EVFILT_READ {
-							event |= EV_READ
-						}
+			n, err0 := syscall.Kevent(p.fd, nil, eventlist, nil)
 
-						if e.Filter == syscall.EVFILT_WRITE {
-							event |= EV_WRITE
-						}
-
-						conn.onActive(event)
-					}
-				}
+			if err0 == syscall.EINTR {
+				continue
 			}
 
-			if n == len(eventlist) {
-				eventlist = make([]syscall.Kevent_t, n<<1)
+			if err0 != nil && err0 != syscall.EINTR {
+				panic(err0)
+				return
+			}
+
+			if n > 0 {
+				for i := 0; i < n; i++ {
+					e := &eventlist[i]
+					fd := int(e.Ident)
+					if fd != 0 {
+						if conn, ok := p.fd2Conn.get(fd); ok {
+							event := int(0)
+							if (e.Flags&syscall.EV_EOF != 0) || (e.Flags&syscall.EV_ERROR != 0) {
+								event |= EV_ERROR
+							}
+
+							if e.Filter == syscall.EVFILT_READ {
+								event |= EV_READ
+							}
+
+							if e.Filter == syscall.EVFILT_WRITE {
+								event |= EV_WRITE
+							}
+
+							conn.onActive(event)
+						}
+					}
+				}
+
+				if n == len(eventlist) {
+					eventlist = make([]syscall.Kevent_t, n<<1)
+				}
 			}
 		}
 	}

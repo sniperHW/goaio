@@ -75,33 +75,4 @@ func TestRingQueue(t *testing.T) {
 
 	}
 
-	{
-		q := newAioContextQueue(2)
-		q.add(aioContext{context: 1})
-		q.add(aioContext{context: 2})
-		assert.Equal(t, q.tail, 2)
-		q.dropLast()
-		assert.Equal(t, q.tail, 1)
-		q.dropLast()
-		assert.Equal(t, q.tail, 0)
-
-		q.add(aioContext{context: 1})
-		q.popFront()
-
-		assert.Equal(t, q.head, 1)
-
-		q.add(aioContext{context: 2})
-		q.popFront()
-
-		assert.Equal(t, q.head, 2)
-		assert.Equal(t, q.head, q.tail)
-
-		q.add(aioContext{context: 3})
-		assert.Equal(t, q.tail, 0)
-
-		q.dropLast()
-		assert.Equal(t, q.tail, 2)
-
-	}
-
 }
