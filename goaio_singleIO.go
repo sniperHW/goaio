@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 type AIOConn struct {
@@ -152,12 +153,24 @@ func (this *AIOConn) doRead() {
 			buff = c.buff
 		}
 
-		size, err := rawRead(this.fd, buff[c.offset:])
+		//size, err := rawRead(this.fd, buff[c.offset:])
+
+		var (
+			r uintptr
+			e syscall.Errno
+		)
+
+		b := buff[c.offset:]
+
+		r, _, e = syscall.RawSyscall(syscall.SYS_READ, uintptr(this.fd), uintptr(unsafe.Pointer(&b)), uintptr(len(b)))
+		size := int(r)
 
 		this.muR.Lock()
-		if err == syscall.EINTR {
+		if e == syscall.EINTR {
 			continue
-		} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
+		} else if size == 0 || (e != 0 && e != syscall.EAGAIN) {
+			var err error
+
 			if size == 0 {
 				err = io.EOF
 			}
@@ -173,7 +186,7 @@ func (this *AIOConn) doRead() {
 				this.r.popFront()
 			}
 
-		} else if err == syscall.EAGAIN {
+		} else if e == syscall.EAGAIN {
 			if ver == this.readableVer {
 				this.readable = false
 			}
@@ -227,23 +240,36 @@ func (this *AIOConn) doWrite() {
 		ver := this.writeableVer
 		this.muW.Unlock()
 
-		size, err := rawWrite(this.fd, c.buff[c.offset:])
+		//size, err := rawWrite(this.fd, c.buff[c.offset:])
+
+		var (
+			r uintptr
+			e syscall.Errno
+		)
+
+		b := c.buff[c.offset:]
+
+		r, _, e = syscall.RawSyscall(syscall.SYS_WRITE, uintptr(this.fd), uintptr(unsafe.Pointer(&b)), uintptr(len(b)))
+		size := int(r)
 
 		this.muW.Lock()
 
-		if size == 0 && len(c.buff[c.offset:]) > 0 {
-			err = io.ErrUnexpectedEOF
-		}
-
-		if err == syscall.EINTR {
+		if e == syscall.EINTR {
 			continue
-		} else if err != nil && err != syscall.EAGAIN {
+		} else if size == 0 || (e != 0 && e != syscall.EAGAIN) {
+			var err error
+			if size == 0 {
+				err = io.ErrUnexpectedEOF
+			} else {
+				err = e
+			}
+
 			for !this.w.empty() {
 				c := this.w.front()
 				this.service.postCompleteStatus(this, c.buff, c.offset, err, c.context)
 				this.w.popFront()
 			}
-		} else if err == syscall.EAGAIN {
+		} else if e == syscall.EAGAIN {
 			if ver == this.writeableVer {
 				this.writeable = false
 			}
