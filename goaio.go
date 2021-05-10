@@ -272,7 +272,7 @@ func (this *AIOConn) processReadTimeout() {
 		for !this.r.empty() {
 			f := this.r.front()
 			if now.After(f.deadline) {
-				this.service.postCompleteStatus(this, f.buffs, 0, ErrRecvTimeout, f.context)
+				this.service.postCompleteStatus(this, f.buffs, f.transfered, ErrRecvTimeout, f.context)
 				this.r.popFront()
 			} else {
 				break
