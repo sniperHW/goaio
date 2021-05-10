@@ -84,16 +84,6 @@ type AIOResult struct {
 	Err           error
 }
 
-type completetionQueue struct {
-	mu        sync.Mutex
-	cond      *sync.Cond
-	head      int
-	tail      int
-	waitCount int
-	queue     []AIOResult
-	closed    bool
-}
-
 type AIOConn struct {
 	fd           int
 	rawconn      net.Conn
