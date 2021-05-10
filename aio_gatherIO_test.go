@@ -1,4 +1,6 @@
-//go test -covermode=count -v -coverprofile=coverage.out -run=.
+// +build gatherIO
+
+//go test -tags=gatherIO -covermode=count -v -coverprofile=coverage.out -run=.
 //go tool cover -html=coverage.out
 //ulimit -n 1048576
 //go test -v -run=^$ -bench BenchmarkEcho128KParallel -count 100
@@ -82,9 +84,9 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 					res.Conn.Close(err)
 					atomic.AddInt32(&clientCount, -1)
 				} else if res.Context.(rune) == 'r' {
-					res.Conn.Send('w', res.Buffs[0][:res.Bytestransfer])
+					res.Conn.Send('w', res.Buff[0][:res.Bytestransfer])
 				} else {
-					res.Conn.Recv('r', res.Buffs[0][:cap(res.Buffs[0])])
+					res.Conn.Recv('r', res.Buff[0][:cap(res.Buff[0])])
 				}
 			}
 
@@ -198,7 +200,7 @@ func TestRecvFull(t *testing.T) {
 				if !ok {
 					break
 				} else if nil == res.Err {
-					assert.Equal(t, string(res.Buffs[0]), "hello")
+					assert.Equal(t, string(res.Buff[0]), "hello")
 					res.Conn.Close(nil)
 					break
 				}
@@ -734,7 +736,7 @@ func TestShareBuffer(t *testing.T) {
 				res.Conn.Recv('r')
 			} else {
 				//使用关闭归还buffpool供其它连接使用
-				buffpool.Release(res.Buffs[0])
+				buffpool.Release(res.Buff[0])
 				count++
 				if count == 10 {
 					break
@@ -1466,7 +1468,7 @@ func testParallel(t *testing.T, par int, msgsize int) {
 						break
 					}
 				} else {
-					res.Conn.Recv('r', res.Buffs[0][:cap(res.Buffs[0])])
+					res.Conn.Recv('r', res.Buff[0][:cap(res.Buff[0])])
 				}
 			}
 		}
@@ -1571,9 +1573,9 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 			if count >= target {
 				break
 			}
-			res.Conn.Recv('r', res.Buffs[0])
+			res.Conn.Recv('r', res.Buff[0])
 		} else {
-			res.Conn.Send('w', res.Buffs[0])
+			res.Conn.Send('w', res.Buff[0])
 		}
 
 	}

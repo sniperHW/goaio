@@ -33,10 +33,10 @@ func main() {
 				res.Conn.Close(res.Err)
 			} else if res.Context.(rune) == 'r' {
 				fmt.Println("on recv")
-				res.Conn.Send('w', res.Buffs[0][:res.Bytestransfer])
+				res.Conn.Send('w', res.Buff[:res.Bytestransfer])
 			} else {
 				fmt.Println("on send")
-				res.Conn.Recv('r', res.Buffs[0][:cap(res.Buffs[0])])
+				res.Conn.Recv('r', res.Buff[:cap(res.Buff)])
 			}
 		}
 	}()

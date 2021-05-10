@@ -202,7 +202,7 @@ func (s *Socket) onRecvComplete(r *goaio.AIOResult) {
 			}
 
 		} else {
-			s.inboundProcessor.OnData(r.Buffs[0][:r.Bytestransfer])
+			s.inboundProcessor.OnData(r.Buff[:r.Bytestransfer])
 			for !s.testFlag(fclosed | frclosed) {
 				msg, err := s.inboundProcessor.Unpack()
 				if nil != err {

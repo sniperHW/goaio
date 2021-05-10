@@ -163,3 +163,11 @@ func (p *kqueue) wait(stoped *int32) {
 		}
 	}
 }
+
+func rawRead(fd int, p []byte) (n int, err error) {
+	return syscall.Read(fd, p)
+}
+
+func rawWrite(fd int, p []byte) (n int, err error) {
+	return syscall.Write(fd, p)
+}
