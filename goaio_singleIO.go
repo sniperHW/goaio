@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unsafe"
 )
 
 type AIOConn struct {
@@ -153,24 +152,12 @@ func (this *AIOConn) doRead() {
 			buff = c.buff
 		}
 
-		//size, err := rawRead(this.fd, buff[c.offset:])
-
-		var (
-			r uintptr
-			e syscall.Errno
-		)
-
-		b := buff[c.offset:]
-
-		r, _, e = syscall.RawSyscall(syscall.SYS_READ, uintptr(this.fd), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
-		size := int(r)
+		size, err := rawRead(this.fd, buff[c.offset:])
 
 		this.muR.Lock()
-		if e == syscall.EINTR {
+		if err == syscall.EINTR {
 			continue
-		} else if size == 0 || (e != 0 && e != syscall.EAGAIN) {
-			var err error
-
+		} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
 			if size == 0 {
 				err = io.EOF
 			}
@@ -186,7 +173,7 @@ func (this *AIOConn) doRead() {
 				this.r.popFront()
 			}
 
-		} else if e == syscall.EAGAIN {
+		} else if err == syscall.EAGAIN {
 			if ver == this.readableVer {
 				this.readable = false
 			}
@@ -240,28 +227,15 @@ func (this *AIOConn) doWrite() {
 		ver := this.writeableVer
 		this.muW.Unlock()
 
-		//size, err := rawWrite(this.fd, c.buff[c.offset:])
-
-		var (
-			r uintptr
-			e syscall.Errno
-		)
-
-		b := c.buff[c.offset:]
-
-		r, _, e = syscall.RawSyscall(syscall.SYS_WRITE, uintptr(this.fd), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
-		size := int(r)
+		size, err := rawWrite(this.fd, c.buff[c.offset:])
 
 		this.muW.Lock()
 
-		if e == syscall.EINTR {
+		if err == syscall.EINTR {
 			continue
-		} else if size == 0 || (e != 0 && e != syscall.EAGAIN) {
-			var err error
+		} else if size == 0 || (err != nil && err != syscall.EAGAIN) {
 			if size == 0 {
 				err = io.ErrUnexpectedEOF
-			} else {
-				err = e
 			}
 
 			for !this.w.empty() {
@@ -269,7 +243,7 @@ func (this *AIOConn) doWrite() {
 				this.service.postCompleteStatus(this, c.buff, c.offset, err, c.context)
 				this.w.popFront()
 			}
-		} else if e == syscall.EAGAIN {
+		} else if err == syscall.EAGAIN {
 			if ver == this.writeableVer {
 				this.writeable = false
 			}
