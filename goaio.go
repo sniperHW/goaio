@@ -48,6 +48,11 @@ type ShareBuffer interface {
 	Release([]byte)
 }
 
+type task struct {
+	tt   int64
+	conn *AIOConn
+}
+
 type AIOConnOption struct {
 	SendqueSize int
 	RecvqueSize int
@@ -56,13 +61,13 @@ type AIOConnOption struct {
 }
 
 type aioContext struct {
-	buffs      [][]byte
 	index      int //buffs索引
 	offset     int //[]byte内下标
 	transfered int //已经传输的字节数
-	readfull   bool
-	context    interface{}
 	deadline   time.Time
+	context    interface{}
+	buffs      [][]byte
+	readfull   bool
 }
 
 type aioContextQueue struct {
@@ -73,10 +78,10 @@ type aioContextQueue struct {
 
 type AIOResult struct {
 	Conn          *AIOConn
+	Bytestransfer int
 	Buffs         [][]byte
 	Context       interface{}
 	Err           error
-	Bytestransfer int
 }
 
 type completetionQueue struct {
@@ -84,9 +89,9 @@ type completetionQueue struct {
 	cond      *sync.Cond
 	head      int
 	tail      int
+	waitCount int
 	queue     []AIOResult
 	closed    bool
-	waitCount int
 }
 
 type AIOConn struct {
@@ -94,14 +99,10 @@ type AIOConn struct {
 	rawconn      net.Conn
 	muR          sync.Mutex
 	muW          sync.Mutex
-	readable     bool
 	readableVer  int
-	writeable    bool
 	writeableVer int
 	w            *aioContextQueue
 	r            *aioContextQueue
-	doingW       bool
-	doingR       bool
 	rtimer       *time.Timer
 	dorTimer     *time.Timer
 	wtimer       *time.Timer
@@ -120,13 +121,17 @@ type AIOConn struct {
 	send_iovec   [MaxIovecSize]syscall.Iovec
 	recv_iovec   [MaxIovecSize]syscall.Iovec
 	connMgr      *connMgr
-	tq           chan func()
+	tq           chan task
+	readable     bool
+	writeable    bool
+	doingW       bool
+	doingR       bool
 }
 
 type AIOService struct {
 	sync.Mutex
 	completeQueue chan AIOResult
-	tq            chan func()
+	tq            chan task
 	poller        pollerI
 	closed        int32
 	waitgroup     *sync.WaitGroup
@@ -243,7 +248,7 @@ func (this *AIOConn) Close(reason error) {
 
 		if !this.doingR {
 			this.doingR = true
-			this.tq <- this.doRead
+			this.tq <- task{conn: this, tt: int64(EV_READ)}
 		}
 		this.muR.Unlock()
 
@@ -255,7 +260,7 @@ func (this *AIOConn) Close(reason error) {
 
 		if !this.doingW {
 			this.doingW = true
-			this.tq <- this.doWrite
+			this.tq <- task{conn: this, tt: int64(EV_WRITE)}
 		}
 		this.muW.Unlock()
 
@@ -328,7 +333,7 @@ func (this *AIOConn) onReadTimeout() {
 	this.dorTimer = this.rtimer
 	if nil != this.dorTimer && !this.doingR {
 		this.doingR = true
-		this.tq <- this.doRead
+		this.tq <- task{conn: this, tt: int64(EV_READ)}
 	}
 }
 
@@ -338,7 +343,7 @@ func (this *AIOConn) onWriteTimeout() {
 	this.dowTimer = this.wtimer
 	if nil != this.dowTimer && !this.doingW {
 		this.doingW = true
-		this.tq <- this.doWrite
+		this.tq <- task{conn: this, tt: int64(EV_WRITE)}
 	}
 }
 
@@ -419,7 +424,7 @@ func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
 	if this.writeable && !this.doingW {
 		this.doingW = true
 		this.muW.Unlock()
-		this.tq <- this.doWrite
+		this.tq <- task{conn: this, tt: int64(EV_WRITE)}
 	} else {
 		this.muW.Unlock()
 	}
@@ -465,7 +470,7 @@ func (this *AIOConn) recv(context interface{}, readfull bool, buffs ...[]byte) e
 	if this.readable && !this.doingR {
 		this.doingR = true
 		this.muR.Unlock()
-		this.tq <- this.doRead
+		this.tq <- task{conn: this, tt: int64(EV_READ)}
 	} else {
 		this.muR.Unlock()
 	}
@@ -494,7 +499,7 @@ func (this *AIOConn) onActive(ev int) {
 		if !this.r.empty() && !this.doingR {
 			this.doingR = true
 			this.muR.Unlock()
-			this.tq <- this.doRead
+			this.tq <- task{conn: this, tt: int64(EV_READ)}
 		} else {
 			this.muR.Unlock()
 		}
@@ -507,7 +512,7 @@ func (this *AIOConn) onActive(ev int) {
 		if !this.w.empty() && !this.doingW {
 			this.doingW = true
 			this.muW.Unlock()
-			this.tq <- this.doWrite
+			this.tq <- task{conn: this, tt: int64(EV_WRITE)}
 		} else {
 			this.muW.Unlock()
 		}
@@ -797,7 +802,7 @@ func NewAIOService(worker int) *AIOService {
 		s.poller = poller
 		s.connMgr = make([]*connMgr, ConnMgrSize)
 		s.waitgroup = waitgroup
-		s.tq = make(chan func(), TaskQueueSize)
+		s.tq = make(chan task, TaskQueueSize)
 		for k, _ := range s.connMgr {
 			m := &connMgr{}
 			m.head.nnext = &m.head
@@ -817,7 +822,11 @@ func NewAIOService(worker int) *AIOService {
 					if !ok {
 						return
 					} else {
-						v()
+						if int(v.tt) == EV_READ {
+							v.conn.doRead()
+						} else {
+							v.conn.doWrite()
+						}
 					}
 				}
 			}()
