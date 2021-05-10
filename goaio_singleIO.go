@@ -162,7 +162,7 @@ func (this *AIOConn) doRead() {
 
 		b := buff[c.offset:]
 
-		r, _, e = syscall.RawSyscall(syscall.SYS_READ, uintptr(this.fd), uintptr(unsafe.Pointer(&b)), uintptr(len(b)))
+		r, _, e = syscall.RawSyscall(syscall.SYS_READ, uintptr(this.fd), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
 		size := int(r)
 
 		this.muR.Lock()
@@ -249,7 +249,7 @@ func (this *AIOConn) doWrite() {
 
 		b := c.buff[c.offset:]
 
-		r, _, e = syscall.RawSyscall(syscall.SYS_WRITE, uintptr(this.fd), uintptr(unsafe.Pointer(&b)), uintptr(len(b)))
+		r, _, e = syscall.RawSyscall(syscall.SYS_WRITE, uintptr(this.fd), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
 		size := int(r)
 
 		this.muW.Lock()
