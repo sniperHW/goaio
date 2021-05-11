@@ -183,12 +183,16 @@ func (this *AIOConn) doRead() {
 		if 0 == total {
 			if nil != this.sharebuff {
 				sharebuff = this.sharebuff.Acquire()
+			}
+
+			if len(sharebuff) > 0 {
 				this.recv_iovec[0] = syscall.Iovec{&sharebuff[0], uint64(len(sharebuff))}
 				userShareBuffer = true
 			} else {
 				c.buff = append(c.buff, make([]byte, DefaultRecvBuffSize))
 				this.recv_iovec[0] = syscall.Iovec{&c.buff[0][0], uint64(DefaultRecvBuffSize)}
 			}
+
 			cc = 1
 		}
 

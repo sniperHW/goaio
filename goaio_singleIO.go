@@ -152,8 +152,12 @@ func (this *AIOConn) doRead() {
 		if len(c.buff) == 0 {
 			if nil != this.sharebuff {
 				buff = this.sharebuff.Acquire()
+			}
+
+			if len(buff) > 0 {
 				userShareBuffer = true
 			} else {
+				userShareBuffer = false
 				buff = make([]byte, DefaultRecvBuffSize)
 				c.buff = buff
 			}
