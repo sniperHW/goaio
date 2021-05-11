@@ -30,12 +30,13 @@ const (
 	EV_WRITE = int(1 << 2)
 	EV_ERROR = int(1 << 3)
 	//这两值定义为常量性能更好，原因尚不明
-	CompleteQueueSize = 65535 * 2
-	TaskQueueSize     = 65535 * 2
+	CompleteQueueSize     = 65535 * 2
+	TaskQueueSize         = 65535 * 2
+	ConnMgrhashMask   int = 16
+	ConnMgrhashSize   int = 1 << ConnMgrhashMask
 )
 
-const (
-	ConnMgrSize         = 263
+var (
 	DefaultWorkerCount  = 1
 	DefaultRecvBuffSize = 4096
 )
@@ -102,7 +103,7 @@ type AIOService struct {
 	poller        pollerI
 	die           chan struct{}
 	closeOnce     sync.Once
-	connMgr       []*connMgr
+	connMgr       [ConnMgrhashSize]connMgr
 }
 
 type connMgr struct {
@@ -405,13 +406,10 @@ func NewAIOService(worker int) *AIOService {
 		s := &AIOService{}
 		s.completeQueue = make(chan AIOResult, CompleteQueueSize)
 		s.poller = poller
-		s.connMgr = make([]*connMgr, ConnMgrSize)
 		s.tq = make(chan task, TaskQueueSize)
 		s.die = make(chan struct{})
 		for k, _ := range s.connMgr {
-			m := &connMgr{}
-			m.head.nnext = &m.head
-			s.connMgr[k] = m
+			s.connMgr[k].head.nnext = &s.connMgr[k].head
 		}
 
 		if worker <= 0 {
@@ -494,7 +492,7 @@ func (this *AIOService) CreateAIOConn(conn net.Conn, option AIOConnOption) (*AIO
 				w:         newAioContextQueue(option.SendqueSize),
 				userData:  option.UserData,
 				tq:        this.tq,
-				connMgr:   this.connMgr[fd%len(this.connMgr)],
+				connMgr:   &this.connMgr[fd>>ConnMgrhashSize],
 			},
 		}
 

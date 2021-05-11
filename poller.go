@@ -7,10 +7,10 @@ import (
 	"unsafe"
 )
 
-const hashMask int = 8
+const hashMask int = 16
 const hashSize int = 1 << hashMask
 
-type fd2Conn []sync.Map
+type fd2Conn [hashSize]sync.Map
 
 func (self *fd2Conn) add(conn *AIOConn) {
 	(*self)[conn.fd>>hashMask].Store(conn.fd, reflect.ValueOf(conn).Pointer())
