@@ -432,7 +432,7 @@ func NewSocket(service *SocketService, conn net.Conn) *Socket {
 		return nil
 	}
 
-	c, err := service.CreateAIOConn(conn)
+	c, err := service.createAIOConn(conn)
 	if err != nil {
 		return nil
 	}

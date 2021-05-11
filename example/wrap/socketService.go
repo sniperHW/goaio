@@ -72,9 +72,9 @@ func (this *SocketService) completeRoutine(s *goaio.AIOService) {
 	}
 }
 
-func (this *SocketService) bind(conn net.Conn) (*goaio.AIOConn, error) {
+func (this *SocketService) createAIOConn(conn net.Conn) (*goaio.AIOConn, error) {
 	idx := rand.Int() % len(this.services)
-	c, err := this.services[idx].Bind(conn, goaio.AIOConnOption{
+	c, err := this.services[idx].CreateAIOConn(conn, goaio.AIOConnOption{
 		SendqueSize: 1,
 		RecvqueSize: 1,
 		ShareBuff:   GetBuffPool(),
