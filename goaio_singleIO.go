@@ -14,8 +14,7 @@ type AIOConn struct {
 }
 
 type aioContext struct {
-	index    int //buffs索引
-	offset   int //[]byte内下标
+	offset   int
 	deadline time.Time
 	buff     []byte
 	context  interface{}
@@ -51,7 +50,11 @@ func (this *AIOConn) Send(context interface{}, buff []byte) error {
 		deadline: deadline,
 	}); nil != err {
 		this.muW.Unlock()
-		return err
+		if this.connMgr.isClosed() {
+			return ErrServiceClosed
+		} else {
+			return err
+		}
 	}
 
 	if !this.connMgr.addIO(this) {
@@ -98,7 +101,11 @@ func (this *AIOConn) recv(context interface{}, readfull bool, buff []byte) error
 		readfull: readfull,
 	}); nil != err {
 		this.muR.Unlock()
-		return err
+		if this.connMgr.isClosed() {
+			return ErrServiceClosed
+		} else {
+			return err
+		}
 	}
 
 	if !this.connMgr.addIO(this) {
@@ -200,7 +207,7 @@ func (this *AIOConn) doRead() {
 	if atomic.LoadInt32(&this.closed) == 1 {
 		for !this.r.empty() {
 			c := this.r.front()
-			this.service.postCompleteStatus(this, c.buff, 0, this.reason, c.context)
+			this.service.postCompleteStatus(this, c.buff, c.offset, this.reason, c.context)
 			this.r.popFront()
 		}
 	} else if nil != this.dorTimer && this.rtimer == this.dorTimer {

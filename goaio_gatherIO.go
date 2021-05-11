@@ -75,7 +75,11 @@ func (this *AIOConn) Send(context interface{}, buffs ...[]byte) error {
 		deadline: deadline,
 	}); nil != err {
 		this.muW.Unlock()
-		return err
+		if this.connMgr.isClosed() {
+			return ErrServiceClosed
+		} else {
+			return err
+		}
 	}
 
 	if !this.connMgr.addIO(this) {
@@ -122,7 +126,11 @@ func (this *AIOConn) recv(context interface{}, readfull bool, buffs ...[]byte) e
 		readfull: readfull,
 	}); nil != err {
 		this.muR.Unlock()
-		return err
+		if this.connMgr.isClosed() {
+			return ErrServiceClosed
+		} else {
+			return err
+		}
 	}
 
 	if !this.connMgr.addIO(this) {
@@ -211,7 +219,7 @@ func (this *AIOConn) doRead() {
 
 			for !this.r.empty() {
 				c := this.r.front()
-				this.service.postCompleteStatus(this, c.buff, 0, err, c.context)
+				this.service.postCompleteStatus(this, c.buff, c.transfered, err, c.context)
 				this.r.popFront()
 			}
 
@@ -262,7 +270,7 @@ func (this *AIOConn) doRead() {
 	if atomic.LoadInt32(&this.closed) == 1 {
 		for !this.r.empty() {
 			c := this.r.front()
-			this.service.postCompleteStatus(this, c.buff, 0, this.reason, c.context)
+			this.service.postCompleteStatus(this, c.buff, c.transfered, this.reason, c.context)
 			this.r.popFront()
 		}
 	} else if nil != this.dorTimer && this.rtimer == this.dorTimer {

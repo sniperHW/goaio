@@ -379,7 +379,7 @@ func TestBusySend(t *testing.T) {
 
 	<-die
 
-	assert.Equal(t, int32(0), c.ioCount)
+	assert.Equal(t, 0, c.ioCount)
 
 	ln.Close()
 }
