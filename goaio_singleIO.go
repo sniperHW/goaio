@@ -274,6 +274,7 @@ func (this *AIOConn) doWrite() {
 }
 
 func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfer int, err error, context interface{}) {
+	c.connMgr.subIO(c)
 	select {
 	case <-this.die:
 		return

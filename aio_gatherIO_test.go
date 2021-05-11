@@ -17,6 +17,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -333,6 +334,8 @@ func TestBusySend(t *testing.T) {
 
 	die := make(chan struct{})
 
+	var closeOnce sync.Once
+
 	go func() {
 		for {
 			res, ok := GetCompleteStatus()
@@ -346,7 +349,9 @@ func TestBusySend(t *testing.T) {
 				}
 			}
 		}
-		close(die)
+		closeOnce.Do(func() {
+			close(die)
+		})
 	}()
 
 	go func() {
@@ -355,7 +360,9 @@ func TestBusySend(t *testing.T) {
 				if err == ErrConnClosed {
 					atomic.AddInt32(&sendBreak, 1)
 					if atomic.LoadInt32(&sendCount) == 0 {
-						close(die)
+						closeOnce.Do(func() {
+							close(die)
+						})
 					}
 					break
 				}
@@ -371,6 +378,8 @@ func TestBusySend(t *testing.T) {
 	}()
 
 	<-die
+
+	assert.Equal(t, int32(0), c.ioCount)
 
 	ln.Close()
 }
