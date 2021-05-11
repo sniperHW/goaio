@@ -11,18 +11,17 @@ import (
 )
 
 var (
-	ErrRecvTimeout        = errors.New("RecvTimeout")
-	ErrSendTimeout        = errors.New("SendTimetout")
-	ErrConnClosed         = errors.New("conn closed")
-	ErrServiceClosed      = errors.New("service closed")
-	ErrUnsupportConn      = errors.New("net.Conn does implement net.RawConn")
-	ErrBusy               = errors.New("busy")
-	ErrWatchFailed        = errors.New("watch failed")
-	ErrActiveClose        = errors.New("active close")
-	ErrCloseNone          = errors.New("close no reason")
-	ErrCloseGC            = errors.New("close by gc")
-	ErrCloseServiceClosed = errors.New("close because of service closed")
-	ErrEmptyBuff          = errors.New("send buffs is empty")
+	ErrRecvTimeout   = errors.New("RecvTimeout")
+	ErrSendTimeout   = errors.New("SendTimetout")
+	ErrConnClosed    = errors.New("conn closed")
+	ErrServiceClosed = errors.New("service closed")
+	ErrUnsupportConn = errors.New("net.Conn does implement net.RawConn")
+	ErrBusy          = errors.New("busy")
+	ErrWatchFailed   = errors.New("watch failed")
+	ErrActiveClose   = errors.New("active close")
+	ErrCloseNone     = errors.New("close no reason")
+	ErrCloseGC       = errors.New("close by gc")
+	ErrEmptyBuff     = errors.New("buffs is empty")
 )
 
 const (
@@ -358,6 +357,9 @@ func (this *AIOConn) onActive(ev int) {
 	}
 }
 
+/*
+ *  AIOConn投递io请求时持有AIOConn的引用，避免AIOConn被GC
+ */
 func (this *connMgr) addIO(c *AIOConn) bool {
 	this.Lock()
 	defer this.Unlock()

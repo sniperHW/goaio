@@ -709,6 +709,122 @@ func TestShareBuffer(t *testing.T) {
 	}
 }
 
+func TestShareBuffer2(t *testing.T) {
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	ln, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	w := NewAIOService(1)
+
+	defer w.Close()
+
+	buffpool := NewBufferPool(4096)
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+
+			fmt.Println("on new client")
+
+			c, _ := w.CreateAIOConn(conn, AIOConnOption{ShareBuff: buffpool})
+
+			c.Recv('r')
+		}
+	}()
+
+	die := make(chan struct{})
+
+	go func() {
+		for {
+			res, ok := w.GetCompleteStatus()
+			if !ok {
+				break
+			} else if nil != res.Err {
+				break
+			}
+		}
+		close(die)
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Second)
+	conn.Close()
+	<-die
+}
+
+func TestShareBuffer3(t *testing.T) {
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	ln, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	w := NewAIOService(1)
+
+	defer w.Close()
+
+	buffpool := NewBufferPool(4096)
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+
+			fmt.Println("on new client")
+
+			c, _ := w.CreateAIOConn(conn, AIOConnOption{ShareBuff: buffpool})
+
+			c.Recv('r')
+		}
+	}()
+
+	die := make(chan struct{})
+
+	go func() {
+		for {
+			res, ok := w.GetCompleteStatus()
+			if !ok {
+				break
+			} else if nil != res.Err {
+				break
+			} else {
+				buffpool.Release(res.Buff[0])
+				res.Conn.Recv('r')
+			}
+		}
+		close(die)
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Write([]byte("hello"))
+	time.Sleep(time.Second)
+	conn.Close()
+	<-die
+}
+
 func TestRecvBusy(t *testing.T) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	if err != nil {
@@ -884,6 +1000,130 @@ func TestRecvTimeout1(t *testing.T) {
 	}
 }
 
+func TestRecvTimeout2(t *testing.T) {
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	ln, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	w := NewAIOService(1)
+
+	defer w.Close()
+
+	go func() {
+
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+
+		fmt.Println("on new client")
+
+		c, _ := w.CreateAIOConn(conn, AIOConnOption{})
+
+		c.SetRecvTimeout(time.Second)
+
+		c.Recv('r')
+
+		time.Sleep(time.Millisecond * 10)
+
+		c.Recv('r')
+
+	}()
+
+	die := make(chan struct{})
+
+	go func() {
+		for {
+			res, ok := w.GetCompleteStatus()
+			if !ok {
+				break
+			} else if nil != res.Err {
+				res.Conn.Close(nil)
+				break
+			}
+		}
+		close(die)
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	<-die
+	conn.Close()
+
+}
+
+func TestRecvTimeout3(t *testing.T) {
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	ln, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	w := NewAIOService(1)
+
+	defer w.Close()
+
+	go func() {
+
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+
+		fmt.Println("on new client")
+
+		c, _ := w.CreateAIOConn(conn, AIOConnOption{})
+
+		c.SetRecvTimeout(time.Second)
+
+		c.Recv('r')
+
+		c.SetRecvTimeout(0)
+
+		c.SetRecvTimeout(time.Second)
+
+	}()
+
+	die := make(chan struct{})
+
+	go func() {
+		for {
+			res, ok := w.GetCompleteStatus()
+			if !ok {
+				break
+			} else if nil != res.Err {
+				res.Conn.Close(nil)
+				break
+			}
+		}
+		close(die)
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	<-die
+	conn.Close()
+
+}
+
 func TestSendTimeout1(t *testing.T) {
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
@@ -925,11 +1165,15 @@ func TestSendTimeout1(t *testing.T) {
 
 	wx := make([]byte, 4096)
 
-	c.Send('w', wx)
-
 	c.SetSendTimeout(time.Second)
 
 	c.Send('w', wx)
+
+	c.Send('w', wx)
+
+	c.SetSendTimeout(0)
+
+	c.SetSendTimeout(time.Second)
 
 	for {
 		res, ok := w.GetCompleteStatus()
