@@ -1,3 +1,4 @@
 *.out
 example/out.txt
 example/echo
+goaio.code-workspace

@@ -33,10 +33,10 @@ func main() {
 				res.Conn.Close(res.Err)
 			} else if res.Context.(rune) == 'r' {
 				fmt.Println("on recv")
-				res.Conn.Send('w', res.Buff[:res.Bytestransfer])
+				res.Conn.Send('w', res.Buff[:res.Bytestransfer], -1)
 			} else {
 				fmt.Println("on send")
-				res.Conn.Recv('r', res.Buff[:cap(res.Buff)])
+				res.Conn.Recv('r', res.Buff[:cap(res.Buff)], time.Second*5)
 			}
 		}
 	}()
@@ -54,9 +54,7 @@ func main() {
 
 		c, _ := goaio.CreateAIOConn(conn, goaio.AIOConnOption{})
 
-		c.SetRecvTimeout(time.Second * 5)
-
-		c.Recv('r', make([]byte, 1024*4))
+		c.Recv('r', make([]byte, 1024*4), time.Second*5)
 
 	}
 
