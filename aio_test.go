@@ -324,7 +324,7 @@ func TestBusySend(t *testing.T) {
 	}
 
 	sendcount := int32(0)
-	sendCompleteCount := int32(0)
+	sendBreak := int32(0)
 
 	die := make(chan struct{})
 
@@ -332,11 +332,11 @@ func TestBusySend(t *testing.T) {
 
 	go func() {
 		for {
-			res, ok := GetCompleteStatus()
+			_, ok := GetCompleteStatus()
 			if !ok {
 				break
 			} else {
-				if atomic.LoadInt32(&sendcount) == atomic.AddInt32(&sendCompleteCount, 1) && res.Err != nil {
+				if 0 == atomic.AddInt32(&sendcount, -1) && atomic.LoadInt32(&sendBreak) == 1 {
 					break
 				}
 			}
@@ -348,12 +348,16 @@ func TestBusySend(t *testing.T) {
 
 	go func() {
 		for {
+			atomic.AddInt32(&sendcount, 1)
 			if err := c.Send('w', []byte("string"), -1); nil != err {
-				if err == ErrConnClosed {
-					break
+				if 0 == atomic.AddInt32(&sendcount, -1) {
+					closeOnce.Do(func() {
+						close(die)
+					})
+				} else {
+					atomic.StoreInt32(&sendBreak, 1)
 				}
-			} else {
-				atomic.AddInt32(&sendcount, 1)
+				break
 			}
 		}
 	}()
@@ -364,10 +368,6 @@ func TestBusySend(t *testing.T) {
 	}()
 
 	<-die
-
-	fmt.Println(sendcount)
-
-	assert.Equal(t, sendcount, sendCompleteCount)
 
 	assert.Equal(t, 0, c.ioCount)
 

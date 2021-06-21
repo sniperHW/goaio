@@ -182,13 +182,14 @@ type AIOResult struct {
 func (this *AIOConn) Send(context interface{}, buff []byte, timeout time.Duration) error {
 
 	this.muW.Lock()
-	defer this.muW.Unlock()
-
+	//defer this.muW.Unlock()
 	if atomic.LoadInt32(&this.closed) == 1 {
+		this.muW.Unlock()
 		return ErrConnClosed
 	}
 
 	if !this.connMgr.addIO(this) {
+		this.muW.Unlock()
 		return ErrServiceClosed
 	}
 
@@ -213,11 +214,16 @@ func (this *AIOConn) Send(context interface{}, buff []byte, timeout time.Duratio
 
 	if this.writeable && !this.doingW {
 		this.doingW = true
-		if !this.service.deliverTask(&task{conn: this, tt: int64(EV_WRITE)}) {
+		this.muW.Unlock()
+		this.doWrite()
+		//this.muW.Lock()
+		/*if !this.service.deliverTask(&task{conn: this, tt: int64(EV_WRITE)}) {
 			removeContext(c)
 			putAioContext(c)
 			return ErrServiceClosed
-		}
+		}*/
+	} else {
+		this.muW.Unlock()
 	}
 
 	return nil
@@ -226,13 +232,15 @@ func (this *AIOConn) Send(context interface{}, buff []byte, timeout time.Duratio
 
 func (this *AIOConn) recv(context interface{}, readfull bool, buff []byte, timeout time.Duration) error {
 	this.muR.Lock()
-	defer this.muR.Unlock()
+	//defer this.muR.Unlock()
 
 	if atomic.LoadInt32(&this.closed) == 1 {
+		this.muR.Unlock()
 		return ErrConnClosed
 	}
 
 	if !this.connMgr.addIO(this) {
+		this.muR.Unlock()
 		return ErrServiceClosed
 	}
 
@@ -257,12 +265,27 @@ func (this *AIOConn) recv(context interface{}, readfull bool, buff []byte, timeo
 	}
 
 	if this.readable && !this.doingR {
-		this.doingR = true
-		if !this.service.deliverTask(&task{conn: this, tt: int64(EV_READ)}) {
-			removeContext(c)
-			putAioContext(c)
-			return ErrServiceClosed
+		if len(buff) == 0 && nil != this.sharebuff {
+			/*
+			 *  使用sharebuff,doRead会调用sharebuff.Acquire，sharebuff.Acquire有可能会阻塞，所以不能直接调用
+			 */
+			this.doingR = true
+			if !this.service.deliverTask(&task{conn: this, tt: int64(EV_READ)}) {
+				removeContext(c)
+				this.muR.Unlock()
+				putAioContext(c)
+				return ErrServiceClosed
+			} else {
+				this.muR.Unlock()
+			}
+		} else {
+			this.doingR = true
+			this.muR.Unlock()
+			this.doRead()
 		}
+
+	} else {
+		this.muR.Unlock()
 	}
 
 	return nil
