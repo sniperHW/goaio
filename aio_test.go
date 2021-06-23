@@ -149,7 +149,7 @@ func TestDefault(t *testing.T) {
 
 	wx := make([]byte, 4096)
 
-	c.Send('w', wx, -1)
+	c.Send1('w', wx, -1)
 
 	for {
 		res, ok := GetCompleteStatus()

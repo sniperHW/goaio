@@ -54,7 +54,7 @@ func main() {
 
 		c, _ := goaio.CreateAIOConn(conn, goaio.AIOConnOption{})
 
-		c.Recv('r', make([]byte, 1024*4), time.Second*5)
+		c.Recv1('r', make([]byte, 1024*4), time.Second*5)
 
 	}
 

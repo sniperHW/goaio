@@ -179,14 +179,16 @@ type AIOResult struct {
 	Err           error
 }
 
-func (this *AIOConn) Send(context interface{}, buff []byte, timeout time.Duration) error {
+func (this *AIOConn) send(context interface{}, buff []byte, timeout time.Duration, dosend bool) error {
+
 	this.muW.Lock()
-	defer this.muW.Unlock()
 	if atomic.LoadInt32(&this.closed) == 1 {
+		this.muW.Unlock()
 		return ErrConnClosed
 	}
 
 	if !this.connMgr.addIO(this) {
+		this.muW.Unlock()
 		return ErrServiceClosed
 	}
 
@@ -196,7 +198,11 @@ func (this *AIOConn) Send(context interface{}, buff []byte, timeout time.Duratio
 
 	if timeout > 0 {
 		c.deadline = time.Now().Add(timeout)
+	}
 
+	pushContext(this.w, c)
+
+	if !c.deadline.IsZero() {
 		if this.firstWDeadline.IsZero() || c.deadline.Before(this.firstWDeadline) {
 			this.firstWDeadline = c.deadline
 			if nil == this.wtimer || this.wtimer.Stop() {
@@ -205,29 +211,39 @@ func (this *AIOConn) Send(context interface{}, buff []byte, timeout time.Duratio
 		}
 	}
 
-	pushContext(this.w, c)
-
 	if this.writeable && !this.doingW {
 		this.doingW = true
-		if !this.service.deliverTask(&task{conn: this, tt: int64(EV_WRITE)}) {
-			removeContext(c)
-			putAioContext(c)
-			return ErrServiceClosed
+		if dosend {
+			this.muW.Unlock()
+			this.doWrite()
+		} else {
+			if !this.service.deliverTask(&task{conn: this, tt: int64(EV_WRITE)}) {
+				removeContext(c)
+				this.muW.Unlock()
+				putAioContext(c)
+				return ErrServiceClosed
+			} else {
+				this.muW.Unlock()
+			}
 		}
+	} else {
+		this.muW.Unlock()
 	}
+
 	return nil
 
 }
 
-func (this *AIOConn) recv(context interface{}, readfull bool, buff []byte, timeout time.Duration) error {
+func (this *AIOConn) recv(context interface{}, readfull bool, buff []byte, timeout time.Duration, doread bool) error {
 	this.muR.Lock()
-	defer this.muR.Unlock()
 
 	if atomic.LoadInt32(&this.closed) == 1 {
+		this.muR.Unlock()
 		return ErrConnClosed
 	}
 
 	if !this.connMgr.addIO(this) {
+		this.muR.Unlock()
 		return ErrServiceClosed
 	}
 
@@ -238,6 +254,11 @@ func (this *AIOConn) recv(context interface{}, readfull bool, buff []byte, timeo
 
 	if timeout > 0 {
 		c.deadline = time.Now().Add(timeout)
+	}
+
+	pushContext(this.r, c)
+
+	if !c.deadline.IsZero() {
 		if this.firstRDeadline.IsZero() || c.deadline.Before(this.firstRDeadline) {
 			this.firstRDeadline = c.deadline
 			if nil == this.rtimer || this.rtimer.Stop() {
@@ -246,26 +267,62 @@ func (this *AIOConn) recv(context interface{}, readfull bool, buff []byte, timeo
 		}
 	}
 
-	pushContext(this.r, c)
-
 	if this.readable && !this.doingR {
 		this.doingR = true
-		if !this.service.deliverTask(&task{conn: this, tt: int64(EV_READ)}) {
-			removeContext(c)
-			putAioContext(c)
-			return ErrServiceClosed
+		if !doread || (len(buff) == 0 && nil != this.sharebuff) {
+			/*
+			 *  使用sharebuff,doRead会调用sharebuff.Acquire，sharebuff.Acquire有可能会阻塞，所以不能直接调用
+			 */
+			if !this.service.deliverTask(&task{conn: this, tt: int64(EV_READ)}) {
+				removeContext(c)
+				this.muR.Unlock()
+				putAioContext(c)
+				return ErrServiceClosed
+			} else {
+				this.muR.Unlock()
+			}
+		} else {
+			this.muR.Unlock()
+			this.doRead()
 		}
+
+	} else {
+		this.muR.Unlock()
 	}
 
 	return nil
 }
 
+func (this *AIOConn) Send(context interface{}, buff []byte, timeout time.Duration) error {
+	return this.send(context, buff, timeout, false)
+}
+
 func (this *AIOConn) Recv(context interface{}, buff []byte, timeout time.Duration) error {
-	return this.recv(context, false, buff, timeout)
+	return this.recv(context, false, buff, timeout, false)
 }
 
 func (this *AIOConn) RecvFull(context interface{}, buff []byte, timeout time.Duration) error {
-	return this.recv(context, true, buff, timeout)
+	return this.recv(context, true, buff, timeout, false)
+}
+
+/*
+ * 以下3个接口在可能的情况下会立即在本地执行io任务
+ *
+ * 禁止在completeRoutine中使用以下3个接口。因为接口可能触发向completeQueue投递的操作。
+ * 如果此时completeQueue满将导致死锁（当前线程阻塞在postCompleteStatus上,因此无法调用GetCompleteStatus去解除阻塞）。
+ *
+ */
+
+func (this *AIOConn) Send1(context interface{}, buff []byte, timeout time.Duration) error {
+	return this.send(context, buff, timeout, true)
+}
+
+func (this *AIOConn) Recv1(context interface{}, buff []byte, timeout time.Duration) error {
+	return this.recv(context, false, buff, timeout, true)
+}
+
+func (this *AIOConn) RecvFull1(context interface{}, buff []byte, timeout time.Duration) error {
+	return this.recv(context, true, buff, timeout, true)
 }
 
 func (this *AIOConn) doRead() {
@@ -394,7 +451,6 @@ func (this *AIOConn) doWrite() {
 				this.writeable = false
 			}
 		} else {
-
 			c.offset += size
 			if c.offset >= len(c.buff) {
 				this.service.postCompleteStatus(this, c.buff, c.offset, nil, c.context)
@@ -426,11 +482,6 @@ func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfe
 	case <-this.die:
 		return
 	default:
-
-		if nil == context {
-			panic("1")
-		}
-
 		this.completeQueue <- AIOResult{
 			Conn:          c,
 			Context:       context,
