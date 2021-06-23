@@ -83,9 +83,9 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 					res.Conn.Close(err)
 					atomic.AddInt32(&clientCount, -1)
 				} else if res.Context.(rune) == 'r' {
-					res.Conn.AsynSend('w', res.Buff[:res.Bytestransfer], -1)
+					res.Conn.Send('w', res.Buff[:res.Bytestransfer], -1)
 				} else {
-					res.Conn.AsynRecv('r', res.Buff[:cap(res.Buff)], -1)
+					res.Conn.Recv('r', res.Buff[:cap(res.Buff)], -1)
 				}
 			}
 
@@ -119,7 +119,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 			atomic.AddInt32(&clientCount, 1)
 
 			buff := make([]byte, bufsize)
-			if err := c.AsynRecv('r', buff, -1); nil != err {
+			if err := c.Recv('r', buff, -1); nil != err {
 				fmt.Println("first recv", err, "fd", c.fd)
 				panic("panic")
 			}
@@ -1097,8 +1097,8 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 			b.Fatal(err)
 		}
 
-		c.AsynSend('w', tx, -1)
-		c.AsynRecv('r', rx, -1)
+		c.Send('w', tx, -1)
+		c.Recv('r', rx, -1)
 		defer c.Close(ErrActiveClose)
 	}
 
@@ -1120,9 +1120,9 @@ func benchmarkEcho(b *testing.B, bufsize int, numconn int) {
 			if count >= target {
 				break
 			}
-			res.Conn.AsynRecv('r', res.Buff, -1)
+			res.Conn.Recv('r', res.Buff, -1)
 		} else {
-			res.Conn.AsynSend('w', res.Buff, -1)
+			res.Conn.Send('w', res.Buff, -1)
 		}
 
 	}
