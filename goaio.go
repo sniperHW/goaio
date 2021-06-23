@@ -180,7 +180,6 @@ type AIOResult struct {
 }
 
 func (this *AIOConn) Send(context interface{}, buff []byte, timeout time.Duration) error {
-
 	this.muW.Lock()
 	defer this.muW.Unlock()
 	if atomic.LoadInt32(&this.closed) == 1 {
@@ -209,6 +208,7 @@ func (this *AIOConn) Send(context interface{}, buff []byte, timeout time.Duratio
 	pushContext(this.w, c)
 
 	if this.writeable && !this.doingW {
+		this.doingW = true
 		if !this.service.deliverTask(&task{conn: this, tt: int64(EV_WRITE)}) {
 			removeContext(c)
 			putAioContext(c)
@@ -221,7 +221,7 @@ func (this *AIOConn) Send(context interface{}, buff []byte, timeout time.Duratio
 
 func (this *AIOConn) recv(context interface{}, readfull bool, buff []byte, timeout time.Duration) error {
 	this.muR.Lock()
-	this.muR.Unlock()
+	defer this.muR.Unlock()
 
 	if atomic.LoadInt32(&this.closed) == 1 {
 		return ErrConnClosed
@@ -394,6 +394,7 @@ func (this *AIOConn) doWrite() {
 				this.writeable = false
 			}
 		} else {
+
 			c.offset += size
 			if c.offset >= len(c.buff) {
 				this.service.postCompleteStatus(this, c.buff, c.offset, nil, c.context)
@@ -425,6 +426,11 @@ func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfe
 	case <-this.die:
 		return
 	default:
+
+		if nil == context {
+			panic("1")
+		}
+
 		this.completeQueue <- AIOResult{
 			Conn:          c,
 			Context:       context,
