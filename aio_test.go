@@ -93,6 +93,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 				break
 			}
 		}
+
 		w.Close()
 		close(die)
 	}()
@@ -163,6 +164,8 @@ func TestDefault(t *testing.T) {
 			}
 		}
 	}
+
+	fmt.Println("here2")
 }
 
 func TestRecvFull(t *testing.T) {

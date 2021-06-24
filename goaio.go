@@ -108,7 +108,6 @@ type AIOConn struct {
 	nnext          *AIOConn
 	ioCount        int
 	connMgr        *connMgr
-	tq             chan func()
 	readable       bool
 	writeable      bool
 	doingW         bool
@@ -120,7 +119,7 @@ type AIOConn struct {
 type AIOService struct {
 	sync.Mutex
 	completeQueue chan AIOResult
-	tq            chan func()
+	taskPool      *taskPool
 	poller        pollerI
 	die           chan struct{}
 	closeOnce     sync.Once
@@ -676,8 +675,9 @@ func NewAIOService(worker int) (s *AIOService) {
 		s = &AIOService{
 			completeQueue: make(chan AIOResult, CompleteQueueSize),
 			poller:        poller,
-			tq:            make(chan /*task*/ func(), TaskQueueSize),
-			die:           make(chan struct{}),
+			taskPool:      newTaskPool(worker),
+			//tq:            make(chan /*task*/ func(), TaskQueueSize),
+			die: make(chan struct{}),
 		}
 
 		runtime.SetFinalizer(s, func(s *AIOService) {
@@ -688,7 +688,7 @@ func NewAIOService(worker int) (s *AIOService) {
 			s.connMgr[k].head.nnext = &s.connMgr[k].head
 		}
 
-		if worker <= 0 {
+		/*if worker <= 0 {
 			worker = 1
 		}
 
@@ -703,7 +703,7 @@ func NewAIOService(worker int) (s *AIOService) {
 					}
 				}
 			}()
-		}
+		}*/
 
 		go poller.wait(s.die)
 	}
@@ -752,10 +752,10 @@ func (this *AIOService) CreateAIOConn(conn net.Conn, option AIOConnOption) (*AIO
 			rawconn:   conn,
 			service:   this,
 			sharebuff: option.ShareBuff,
-			tq:        this.tq,
-			connMgr:   &this.connMgr[fd>>ConnMgrhashSize],
-			w:         &aioContext{},
-			r:         &aioContext{},
+			//tq:        this.tq,
+			connMgr: &this.connMgr[fd>>ConnMgrhashSize],
+			w:       &aioContext{},
+			r:       &aioContext{},
 		}
 
 		cc.taskR = func() {
@@ -787,7 +787,8 @@ func (this *AIOService) CreateAIOConn(conn net.Conn, option AIOConnOption) (*AIO
 func (this *AIOService) deliverTask(task func()) {
 	select {
 	case <-this.die:
-	case this.tq <- task:
+	default:
+		this.taskPool.addTask(task)
 	}
 }
 
@@ -808,6 +809,8 @@ func (this *AIOService) Close() {
 		defer this.Unlock()
 
 		close(this.die)
+
+		this.taskPool.close()
 
 		this.poller.close()
 
