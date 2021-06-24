@@ -119,7 +119,7 @@ func echoServer(t testing.TB, bufsize int) (net.Listener, chan struct{}) {
 			atomic.AddInt32(&clientCount, 1)
 
 			buff := make([]byte, bufsize)
-			if err := c.Recv('r', buff, -1); nil != err {
+			if err := c.Recv1('r', buff, -1); nil != err {
 				fmt.Println("first recv", err, "fd", c.fd)
 				panic("panic")
 			}
@@ -274,7 +274,7 @@ func TestSendEmptyBuff(t *testing.T) {
 		}
 	}()
 
-	c.Send('w', nil, -1)
+	c.Send1('w', nil, -1)
 
 	<-die
 
@@ -349,7 +349,7 @@ func TestBusySend(t *testing.T) {
 	go func() {
 		for {
 			atomic.AddInt32(&sendcount, 1)
-			if err := c.Send('w', []byte("string"), -1); nil != err {
+			if err := c.Send1('w', []byte("string"), -1); nil != err {
 				if 0 == atomic.AddInt32(&sendcount, -1) {
 					closeOnce.Do(func() {
 						close(die)

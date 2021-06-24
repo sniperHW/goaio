@@ -42,6 +42,26 @@ type poller_base struct {
 	pending   *list.List
 }
 
+func watch(p *poller_base, conn *AIOConn) <-chan bool {
+	p.muPending.Lock()
+	ch := make(chan bool)
+	p.pending.PushBack(pendingWatch{
+		conn: conn,
+		resp: ch,
+	})
+	p.muPending.Unlock()
+	return ch
+}
+
+func doWatch(p *poller_base, f func(*AIOConn) bool) {
+	p.muPending.Lock()
+	for e := p.pending.Front(); nil != e; e = p.pending.Front() {
+		v := p.pending.Remove(e).(pendingWatch)
+		v.resp <- f(v.conn)
+	}
+	p.muPending.Unlock()
+}
+
 type pollerI interface {
 	close()
 	trigger() error
