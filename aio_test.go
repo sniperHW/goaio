@@ -15,7 +15,6 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"runtime"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -320,46 +319,30 @@ func TestBusySend(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c, err := CreateAIOConn(conn, AIOConnOption{})
+	service := NewAIOService(1)
+
+	c, err := service.CreateAIOConn(conn, AIOConnOption{})
 
 	if nil != err {
 		t.Fatal(err)
 	}
 
-	sendcount := int32(0)
-	sendBreak := int32(0)
-
 	die := make(chan struct{})
-
-	var closeOnce sync.Once
 
 	go func() {
 		for {
-			_, ok := GetCompleteStatus()
+			_, ok := service.GetCompleteStatus()
 			if !ok {
-				break
-			} else {
-				if 0 == atomic.AddInt32(&sendcount, -1) && atomic.LoadInt32(&sendBreak) == 1 {
-					break
-				}
+				fmt.Println("break")
+				close(die)
+				return
 			}
 		}
-		closeOnce.Do(func() {
-			close(die)
-		})
 	}()
 
 	go func() {
 		for {
-			atomic.AddInt32(&sendcount, 1)
 			if err := c.Send1('w', []byte("string"), -1); nil != err {
-				if 0 == atomic.AddInt32(&sendcount, -1) {
-					closeOnce.Do(func() {
-						close(die)
-					})
-				} else {
-					atomic.StoreInt32(&sendBreak, 1)
-				}
 				break
 			}
 		}
@@ -368,11 +351,14 @@ func TestBusySend(t *testing.T) {
 	go func() {
 		time.Sleep(time.Millisecond * 5)
 		c.Close(nil)
+		time.Sleep(time.Second)
+		service.Close()
+		fmt.Println("service close")
 	}()
 
-	<-die
+	service.Close()
 
-	assert.Equal(t, 0, c.ioCount)
+	<-die
 
 	ln.Close()
 }

@@ -1,9 +1,74 @@
 package goaio
 
 import (
-	"container/list"
 	"sync"
 )
+
+type listItem struct {
+	pprev *listItem
+	nnext *listItem
+	v     interface{}
+}
+
+var itemPool *sync.Pool = &sync.Pool{
+	New: func() interface{} {
+		return &listItem{}
+	},
+}
+
+func getItem(v interface{}) (i *listItem) {
+	i = itemPool.Get().(*listItem)
+	i.v = v
+	return i
+}
+
+func putItem(i *listItem) {
+	i.v = nil
+	itemPool.Put(i)
+}
+
+type linkList struct {
+	head *listItem
+}
+
+func (l *linkList) push(v interface{}) {
+	n := getItem(v)
+	tail := l.head.pprev
+	n.nnext = tail.nnext
+	n.pprev = tail
+	tail.nnext = n
+	l.head.pprev = n
+}
+
+func (l *linkList) pop() interface{} {
+	if l.head.nnext == l.head {
+		return nil
+	} else {
+		first := l.head.nnext
+		l.removeContext(first)
+		v := first.v
+		putItem(first)
+		return v
+	}
+}
+
+func (l *linkList) removeContext(n *listItem) {
+	if nil != n.nnext && nil != n.pprev && n.nnext != n && n.pprev != n {
+		next := n.nnext
+		prev := n.pprev
+		prev.nnext = next
+		next.pprev = prev
+		n.nnext = nil
+		n.pprev = nil
+	}
+}
+
+func newList() *linkList {
+	l := &linkList{head: &listItem{}}
+	l.head.nnext = l.head
+	l.head.pprev = l.head
+	return l
+}
 
 type routine struct {
 	taskCh chan func()
@@ -31,8 +96,8 @@ type taskPool struct {
 	die             bool
 	routineCount    int
 	maxRoutineCount int
-	freeRoutines    *list.List
-	taskQueue       *list.List
+	freeRoutines    *linkList
+	taskQueue       *linkList
 }
 
 func newTaskPool(maxRoutineCount int) *taskPool {
@@ -41,8 +106,8 @@ func newTaskPool(maxRoutineCount int) *taskPool {
 	}
 	return &taskPool{
 		maxRoutineCount: maxRoutineCount,
-		freeRoutines:    list.New(),
-		taskQueue:       list.New(),
+		freeRoutines:    newList(),
+		taskQueue:       newList(),
 	}
 }
 
@@ -52,13 +117,12 @@ func (p *taskPool) putRoutine(r *routine) (bool, func()) {
 		p.Unlock()
 		return false, nil
 	} else {
-		f := p.taskQueue.Front()
-		if nil != f {
-			v := p.taskQueue.Remove(f).(func())
+		v := p.taskQueue.pop()
+		if nil != v {
 			p.Unlock()
-			return true, v
+			return true, v.(func())
 		} else {
-			p.freeRoutines.PushBack(r)
+			p.freeRoutines.push(r)
 			p.Unlock()
 		}
 		return true, nil
@@ -66,8 +130,8 @@ func (p *taskPool) putRoutine(r *routine) (bool, func()) {
 }
 
 func (p *taskPool) getRoutine() *routine {
-	if f := p.freeRoutines.Front(); nil != f {
-		return p.freeRoutines.Remove(f).(*routine)
+	if f := p.freeRoutines.pop(); nil != f {
+		return f.(*routine)
 	} else {
 		return nil
 	}
@@ -83,7 +147,7 @@ func (p *taskPool) addTask(task func()) bool {
 		r.taskCh <- task
 		return true
 	} else if p.routineCount >= p.maxRoutineCount {
-		p.taskQueue.PushBack(task)
+		p.taskQueue.push(task)
 		p.Unlock()
 		return true
 	} else {
@@ -102,8 +166,7 @@ func (p *taskPool) close() {
 	if !p.die {
 		p.die = true
 	}
-	for f := p.freeRoutines.Front(); nil != f; f = p.freeRoutines.Front() {
-		v := p.freeRoutines.Remove(f).(*routine)
-		close(v.taskCh)
+	for v := p.freeRoutines.pop(); nil != v; v = p.freeRoutines.pop() {
+		close(v.(*routine).taskCh)
 	}
 }

@@ -457,12 +457,14 @@ func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfe
 	case <-this.die:
 		return
 	default:
-		this.completeQueue <- AIOResult{
-			Conn:          c,
-			Context:       context,
-			Err:           err,
-			Buff:          buff,
-			Bytestransfer: bytestransfer,
+		if atomic.LoadInt32(&c.closed) == 0 {
+			this.completeQueue <- AIOResult{
+				Conn:          c,
+				Context:       context,
+				Err:           err,
+				Buff:          buff,
+				Bytestransfer: bytestransfer,
+			}
 		}
 	}
 }
@@ -676,8 +678,7 @@ func NewAIOService(worker int) (s *AIOService) {
 			completeQueue: make(chan AIOResult, CompleteQueueSize),
 			poller:        poller,
 			taskPool:      newTaskPool(worker),
-			//tq:            make(chan /*task*/ func(), TaskQueueSize),
-			die: make(chan struct{}),
+			die:           make(chan struct{}),
 		}
 
 		runtime.SetFinalizer(s, func(s *AIOService) {
@@ -687,23 +688,6 @@ func NewAIOService(worker int) (s *AIOService) {
 		for k, _ := range s.connMgr {
 			s.connMgr[k].head.nnext = &s.connMgr[k].head
 		}
-
-		/*if worker <= 0 {
-			worker = 1
-		}
-
-		for i := 0; i < worker; i++ {
-			go func() {
-				for {
-					select {
-					case <-s.die:
-						return
-					case v := <-s.tq:
-						v()
-					}
-				}
-			}()
-		}*/
 
 		go poller.wait(s.die)
 	}
@@ -752,10 +736,9 @@ func (this *AIOService) CreateAIOConn(conn net.Conn, option AIOConnOption) (*AIO
 			rawconn:   conn,
 			service:   this,
 			sharebuff: option.ShareBuff,
-			//tq:        this.tq,
-			connMgr: &this.connMgr[fd>>ConnMgrhashSize],
-			w:       &aioContext{},
-			r:       &aioContext{},
+			connMgr:   &this.connMgr[fd>>ConnMgrhashSize],
+			w:         &aioContext{},
+			r:         &aioContext{},
 		}
 
 		cc.taskR = func() {
@@ -792,14 +775,13 @@ func (this *AIOService) deliverTask(task func()) {
 	}
 }
 
-func (this *AIOService) GetCompleteStatus() (r AIOResult, ok bool) {
+func (this *AIOService) GetCompleteStatus() (AIOResult, bool) {
 	select {
 	case <-this.die:
-		ok = false
-	default:
-		r, ok = <-this.completeQueue
+		return AIOResult{}, false
+	case r := <-this.completeQueue:
+		return r, true
 	}
-	return
 }
 
 func (this *AIOService) Close() {
