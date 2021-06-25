@@ -6,11 +6,11 @@ package goaio
 
 const maxPoolItemCount = 4096
 
-var gItemPool *sync.Pool = &sync.Pool{
+/*var gItemPool *sync.Pool = &sync.Pool{
 	New: func() interface{} {
 		return &listItem{}
 	},
-}
+}*/
 
 type listItem struct {
 	nnext *listItem
@@ -55,7 +55,7 @@ func (this *linkList) getPoolItem(v interface{}) *listItem {
 	item := this.popItem(&this.itemPool)
 	if nil == item {
 		//item = gItemPool.Get().(*listItem)
-		item = *listItem{}
+		item = &listItem{}
 	} else {
 		this.poolCount--
 	}
