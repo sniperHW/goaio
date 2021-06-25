@@ -3,9 +3,6 @@
 package goaio
 
 import (
-	"container/list"
-	//"sync"
-	//"sync/atomic"
 	"syscall"
 )
 
@@ -20,9 +17,6 @@ func openPoller() (*kqueue, error) {
 	}
 	poller := new(kqueue)
 	poller.fd = kfd
-	//poller.fd2Conn = fd2Conn(make([]sync.Map, hashSize))
-	//poller.die = make(chan struct{})
-	poller.pending = list.New()
 
 	_, err = syscall.Kevent(poller.fd, []syscall.Kevent_t{{
 		Ident:  0,

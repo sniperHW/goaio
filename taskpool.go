@@ -4,72 +4,6 @@ import (
 	"sync"
 )
 
-type listItem struct {
-	pprev *listItem
-	nnext *listItem
-	v     interface{}
-}
-
-var itemPool *sync.Pool = &sync.Pool{
-	New: func() interface{} {
-		return &listItem{}
-	},
-}
-
-func getItem(v interface{}) (i *listItem) {
-	i = itemPool.Get().(*listItem)
-	i.v = v
-	return i
-}
-
-func putItem(i *listItem) {
-	i.v = nil
-	itemPool.Put(i)
-}
-
-type linkList struct {
-	head *listItem
-}
-
-func (l *linkList) push(v interface{}) {
-	n := getItem(v)
-	tail := l.head.pprev
-	n.nnext = tail.nnext
-	n.pprev = tail
-	tail.nnext = n
-	l.head.pprev = n
-}
-
-func (l *linkList) pop() interface{} {
-	if l.head.nnext == l.head {
-		return nil
-	} else {
-		first := l.head.nnext
-		l.removeContext(first)
-		v := first.v
-		putItem(first)
-		return v
-	}
-}
-
-func (l *linkList) removeContext(n *listItem) {
-	if nil != n.nnext && nil != n.pprev && n.nnext != n && n.pprev != n {
-		next := n.nnext
-		prev := n.pprev
-		prev.nnext = next
-		next.pprev = prev
-		n.nnext = nil
-		n.pprev = nil
-	}
-}
-
-func newList() *linkList {
-	l := &linkList{head: &listItem{}}
-	l.head.nnext = l.head
-	l.head.pprev = l.head
-	return l
-}
-
 type routine struct {
 	taskCh chan func()
 }
@@ -96,8 +30,8 @@ type taskPool struct {
 	die             bool
 	routineCount    int
 	maxRoutineCount int
-	freeRoutines    *linkList
-	taskQueue       *linkList
+	freeRoutines    linkList
+	taskQueue       linkList
 }
 
 func newTaskPool(maxRoutineCount int) *taskPool {
@@ -106,8 +40,6 @@ func newTaskPool(maxRoutineCount int) *taskPool {
 	}
 	return &taskPool{
 		maxRoutineCount: maxRoutineCount,
-		freeRoutines:    newList(),
-		taskQueue:       newList(),
 	}
 }
 
