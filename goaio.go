@@ -453,18 +453,16 @@ func (this *AIOConn) doWrite() {
 
 func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfer int, err error, context interface{}) {
 	c.connMgr.subIO(c)
-	select {
-	case <-this.die:
-		return
-	default:
-		if atomic.LoadInt32(&c.closed) == 0 {
-			this.completeQueue <- AIOResult{
-				Conn:          c,
-				Context:       context,
-				Err:           err,
-				Buff:          buff,
-				Bytestransfer: bytestransfer,
-			}
+	if atomic.LoadInt32(&c.closed) == 0 {
+		select {
+		case <-this.die:
+		case this.completeQueue <- AIOResult{
+			Conn:          c,
+			Context:       context,
+			Err:           err,
+			Buff:          buff,
+			Bytestransfer: bytestransfer,
+		}:
 		}
 	}
 }
