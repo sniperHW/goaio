@@ -99,7 +99,7 @@ type AIOConn struct {
 	dowTimer       *time.Timer
 	service        *AIOService
 	closed         int32
-	closeOnce      sync.Once
+	closeOnce      int32
 	sendTimeout    time.Duration
 	recvTimeout    time.Duration
 	reason         error
@@ -468,7 +468,7 @@ func (this *AIOService) postCompleteStatus(c *AIOConn, buff []byte, bytestransfe
 }
 
 func (this *AIOConn) Close(reason error) {
-	this.closeOnce.Do(func() {
+	if atomic.CompareAndSwapInt32(&this.closeOnce, 0, 1) {
 		runtime.SetFinalizer(this, nil)
 
 		if nil == reason {
@@ -506,7 +506,7 @@ func (this *AIOConn) Close(reason error) {
 
 		this.rawconn.Close()
 
-	})
+	}
 }
 
 func (this *AIOConn) processReadTimeout() {

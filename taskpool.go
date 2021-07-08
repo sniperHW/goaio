@@ -115,8 +115,8 @@ func (p *taskPool) close() {
 	defer p.Unlock()
 	if !p.die {
 		p.die = true
-	}
-	for r := p.getRoutine(); nil != r; r = p.getRoutine() {
-		close(r.taskCh)
+		for r := p.getRoutine(); nil != r; r = p.getRoutine() {
+			close(r.taskCh)
+		}
 	}
 }
